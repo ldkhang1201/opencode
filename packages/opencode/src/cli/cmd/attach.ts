@@ -130,19 +130,65 @@ export const AttachCommand = cmd({
     const { Effect } = await import("effect")
     const { run } = await import("../tui/layer")
     const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
-    await Effect.runPromise(
-      run({
-        url: args.url,
-        config,
-        pluginHost: createLegacyTuiPluginHost(),
-        args: {
-          continue: args.continue,
-          sessionID: args.session,
-          fork: args.fork,
-        },
-        directory,
-        headers,
-      }),
-    )
+    const { TeleportHandoff, TeleportReturn, createTeleportClient } = await import("@opencode-ai/tui/teleport")
+
+    // Relaunch loop: a TeleportHandoff exit reason re-attaches the TUI to the
+    // remote tunnel; a TeleportReturn exit reason pulls the session back via
+    // the server we originally attached to and re-runs against it.
+    const original: { url: string; headers: RequestInit["headers"]; directory: string | undefined } = {
+      url: args.url,
+      headers,
+      directory,
+    }
+    let current = { ...original, sessionID: args.session as string | undefined, teleport: false }
+    let first = true
+    while (true) {
+      const result = await Effect.runPromise(
+        run({
+          url: current.url,
+          config,
+          pluginHost: createLegacyTuiPluginHost(),
+          args: {
+            continue: first ? args.continue : undefined,
+            sessionID: current.sessionID,
+            fork: first ? args.fork : undefined,
+            teleport: current.teleport,
+          },
+          directory: current.directory,
+          headers: current.headers,
+        }),
+      )
+      first = false
+      const reason = result.reason
+      if (reason instanceof TeleportHandoff) {
+        current = {
+          url: reason.url,
+          headers: reason.headers,
+          directory: reason.directory,
+          sessionID: reason.sessionID,
+          teleport: true,
+        }
+        continue
+      }
+      if (reason instanceof TeleportReturn) {
+        const prompts = await import("@clack/prompts")
+        const spinner = prompts.spinner()
+        spinner.start("Returning session")
+        try {
+          await createTeleportClient({
+            url: original.url,
+            headers: original.headers,
+            directory: original.directory,
+          }).return(reason.sessionID, { scrub: reason.scrub })
+          spinner.stop("Session returned")
+        } catch (error) {
+          spinner.stop("Failed to return session", 1)
+          UI.error(errorMessage(error))
+        }
+        current = { ...original, sessionID: reason.sessionID, teleport: false }
+        continue
+      }
+      break
+    }
   },
 })

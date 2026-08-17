@@ -270,31 +270,93 @@ export const TuiThreadCommand = cmd({
         const { Effect } = await import("effect")
         const { run } = await import("../tui/layer")
         const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
-        await Effect.runPromise(
-          run({
-            url: transport.url,
-            async onSnapshot() {
-              const tui = writeHeapSnapshot("tui.heapsnapshot")
-              const server = await client.call("snapshot", undefined)
-              return [tui, server]
-            },
-            config,
-            pluginHost: createLegacyTuiPluginHost(),
-            directory: cwd,
-            fetch: transport.fetch,
-            headers: transport.headers,
-            events: transport.events,
-            args: {
-              continue: args.continue,
-              sessionID: args.session,
-              agent: args.agent,
-              model: args.model,
-              prompt,
-              fork: args.fork,
-              auto: args.auto || args.yolo || args["dangerously-skip-permissions"],
-            },
-          }),
-        )
+        const { TeleportHandoff, TeleportReturn, createTeleportClient } = await import("@opencode-ai/tui/teleport")
+
+        // Relaunch loop: a TeleportHandoff exit reason re-attaches the TUI to
+        // the remote tunnel; a TeleportReturn exit reason pulls the session
+        // back via the original (worker) transport and re-runs locally.
+        type TuiTransport = {
+          url: string
+          fetch: typeof globalThis.fetch | undefined
+          headers: RequestInit["headers"]
+          events: EventSource | undefined
+          directory: string | undefined
+        }
+        const original: TuiTransport = {
+          url: transport.url,
+          fetch: transport.fetch,
+          headers: transport.headers,
+          events: transport.events,
+          directory: cwd,
+        }
+        let current: TuiTransport & { sessionID: string | undefined; teleport: boolean } = {
+          ...original,
+          sessionID: args.session,
+          teleport: false,
+        }
+        let first = true
+        while (true) {
+          const result = await Effect.runPromise(
+            run({
+              url: current.url,
+              async onSnapshot() {
+                const tui = writeHeapSnapshot("tui.heapsnapshot")
+                const server = await client.call("snapshot", undefined)
+                return [tui, server]
+              },
+              config,
+              pluginHost: createLegacyTuiPluginHost(),
+              directory: current.directory,
+              fetch: current.fetch,
+              headers: current.headers,
+              events: current.events,
+              args: {
+                continue: first ? args.continue : undefined,
+                sessionID: current.sessionID,
+                agent: args.agent,
+                model: args.model,
+                prompt: first ? prompt : undefined,
+                fork: first ? args.fork : undefined,
+                auto: args.auto || args.yolo || args["dangerously-skip-permissions"],
+                teleport: current.teleport,
+              },
+            }),
+          )
+          first = false
+          const reason = result.reason
+          if (reason instanceof TeleportHandoff) {
+            current = {
+              url: reason.url,
+              fetch: undefined,
+              headers: reason.headers,
+              events: undefined,
+              directory: reason.directory,
+              sessionID: reason.sessionID,
+              teleport: true,
+            }
+            continue
+          }
+          if (reason instanceof TeleportReturn) {
+            const prompts = await import("@clack/prompts")
+            const spinner = prompts.spinner()
+            spinner.start("Returning session to this machine")
+            try {
+              await createTeleportClient({
+                url: original.url,
+                fetch: original.fetch,
+                headers: original.headers,
+                directory: original.directory,
+              }).return(reason.sessionID, { scrub: reason.scrub })
+              spinner.stop("Session returned")
+            } catch (error) {
+              spinner.stop("Failed to return session", 1)
+              UI.error(errorMessage(error))
+            }
+            current = { ...original, sessionID: reason.sessionID, teleport: false }
+            continue
+          }
+          break
+        }
       } finally {
         await stop()
       }

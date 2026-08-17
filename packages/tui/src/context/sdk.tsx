@@ -45,6 +45,22 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       },
     }
 
+    // Connection notifications: "lost" on the first SSE drop, "restored" once
+    // a new subscription is established after one or more failed attempts.
+    // The sync provider listens to trigger a re-sync (sdk cannot import sync).
+    const connectionHandlers = new Set<(event: "lost" | "restored") => void>()
+    const connection = {
+      emit(event: "lost" | "restored") {
+        for (const handler of connectionHandlers) handler(event)
+      },
+      on(handler: (event: "lost" | "restored") => void) {
+        connectionHandlers.add(handler)
+        return () => {
+          connectionHandlers.delete(handler)
+        }
+      },
+    }
+
     let queue: GlobalEvent[] = []
     let timer: Timer | undefined
     let last = 0
@@ -88,26 +104,38 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         while (true) {
           if (abort.signal.aborted || ctrl.signal.aborted) break
 
-          const events = await sdk.global.event({
-            signal: ctrl.signal,
-            sseMaxRetryAttempts: 0,
-          })
+          try {
+            const events = await sdk.global.event({
+              signal: ctrl.signal,
+              sseMaxRetryAttempts: 0,
+            })
 
-          if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-            // Start syncing workspaces, it's important to do this after
-            // we've started listening to events
-            await sdk.sync.start().catch(() => {})
-          }
+            if (attempt > 0) {
+              // Re-subscribed after at least one failure: events were missed,
+              // let listeners (sync provider) catch up.
+              attempt = 0
+              connection.emit("restored")
+            }
 
-          for await (const event of events.stream) {
-            if (ctrl.signal.aborted) break
-            handleEvent(event)
+            if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+              // Start syncing workspaces, it's important to do this after
+              // we've started listening to events
+              await sdk.sync.start().catch(() => {})
+            }
+
+            for await (const event of events.stream) {
+              if (ctrl.signal.aborted) break
+              handleEvent(event)
+            }
+          } catch {
+            // Subscription failed; fall through to the backoff below.
           }
 
           if (timer) clearTimeout(timer)
           if (queue.length > 0) flush()
           attempt += 1
           if (abort.signal.aborted || ctrl.signal.aborted) break
+          if (attempt === 1) connection.emit("lost")
 
           // Exponential backoff
           const backoff = Math.min(retryDelay * 2 ** (attempt - 1), maxRetryDelay)
@@ -136,6 +164,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       sse?.abort()
       if (timer) clearTimeout(timer)
       handlers.clear()
+      connectionHandlers.clear()
     })
 
     return {
@@ -145,7 +174,11 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       directory: props.directory,
       event: emitter,
       fetch: props.fetch ?? fetch,
+      headers: props.headers,
       url: props.url,
+      connection: {
+        on: connection.on,
+      },
     }
   },
 })

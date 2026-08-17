@@ -8,6 +8,8 @@ export interface Args {
   sessionID?: string
   fork?: boolean
   auto?: boolean
+  /** Set when the TUI was relaunched against a teleport tunnel */
+  teleport?: boolean
 }
 
 export const { use: useArgs, provider: ArgsProvider } = createSimpleContext({

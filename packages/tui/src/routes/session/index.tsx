@@ -53,6 +53,10 @@ import { DialogConfirm } from "../../ui/dialog-confirm"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
+import { DialogTeleport } from "../../component/dialog-teleport"
+import { TeleportReturn, teleportMetadata } from "../../teleport"
+import { useArgs } from "../../context/args"
+import { useExit } from "../../context/exit"
 import { Sidebar } from "./sidebar"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
@@ -197,6 +201,13 @@ export function Session() {
   const location = createMemo(() => {
     const current = session()
     return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined
+  })
+  const args = useArgs()
+  const exit = useExit()
+  const teleported = createMemo(() => {
+    const meta = teleportMetadata(session()?.metadata)
+    if (!meta || meta.state !== "teleported") return undefined
+    return meta
   })
 
   createEffect(() => {
@@ -606,6 +617,30 @@ export function Session() {
             })
           })
         dialog.clear()
+      },
+    },
+    {
+      title: "Teleport session",
+      value: "session.teleport",
+      category: "Session",
+      slash: {
+        name: "teleport",
+      },
+      run: () => {
+        dialog.replace(() => <DialogTeleport />)
+      },
+    },
+    {
+      title: "Return teleported session here",
+      value: "session.teleport.return",
+      category: "Session",
+      enabled: args.teleport === true,
+      slash: {
+        name: "teleport-return",
+        aliases: ["return"],
+      },
+      run: () => {
+        exit(new TeleportReturn(route.sessionID))
       },
     },
     {
@@ -1178,6 +1213,15 @@ export function Session() {
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
             <Show when={session()}>
+              <Show when={teleported()}>
+                {(meta) => (
+                  <box flexShrink={0}>
+                    <text fg={theme.textMuted}>
+                      ⇄ teleported{meta().host ? ` to ${meta().host}` : ""} — /teleport to manage
+                    </text>
+                  </box>
+                )}
+              </Show>
               <scrollbox
                 ref={(r) => (scroll = r)}
                 viewportOptions={{

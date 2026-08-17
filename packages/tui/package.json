@@ -25,6 +25,7 @@
     "./context/editor": "./src/context/editor.ts",
     "./context/clipboard": "./src/context/clipboard.tsx",
     "./attention": "./src/attention.ts",
+    "./teleport": "./src/teleport.ts",
     "./editor": "./src/editor.ts",
     "./editor-zed": "./src/editor-zed.ts",
     "./runtime": "./src/runtime.tsx",

@@ -86,6 +86,7 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
+import { TeleportHandoff, TeleportReturn } from "./teleport"
 
 registerOpencodeSpinner()
 
@@ -356,10 +357,14 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   )
   yield* Effect.sync(() => {
     win32FlushInputBuffer()
-    if (result.reason !== undefined)
+    // Teleport handoff/return reasons are control flow for the CLI relaunch
+    // loop, not errors — never print them.
+    const teleport = result.reason instanceof TeleportHandoff || result.reason instanceof TeleportReturn
+    if (result.reason !== undefined && !teleport)
       process.stderr.write((cliErrorMessage(result.reason) ?? errorFormat(result.reason)) + "\n")
-    if (result.epilogue) process.stdout.write(result.epilogue + "\n")
+    if (result.epilogue && !teleport) process.stdout.write(result.epilogue + "\n")
   })
+  return result
 })
 
 function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost }) {

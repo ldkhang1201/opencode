@@ -24,11 +24,13 @@ import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "./project"
 import { useEvent } from "./event"
 import { useSDK } from "./sdk"
+import { useRoute } from "./route"
 import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { useToast } from "../ui/toast"
+import { batch, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
@@ -447,6 +449,8 @@ export const {
 
     const exit = useExit()
     const args = useArgs()
+    const route = useRoute()
+    const toast = useToast()
 
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
@@ -581,6 +585,15 @@ export const {
           const list = await listSessions()
           setStore("session", reconcile(list))
         },
+        /**
+         * Drop the full-sync cache and refetch. Used after an SSE gap where
+         * events were missed and the store may be stale.
+         */
+        async resync(sessionID?: string) {
+          fullSyncedSessions.clear()
+          await result.session.refresh()
+          if (sessionID) await result.session.sync(sessionID)
+        },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
           if (!session) return "idle"
@@ -668,6 +681,21 @@ export const {
       },
       bootstrap,
     }
+
+    // Re-sync after SSE gaps: events were missed while disconnected, so the
+    // store must catch up once the subscription is re-established.
+    onCleanup(
+      sdk.connection.on((event) => {
+        if (event === "lost") {
+          toast.show({ message: "Connection lost — retrying", variant: "warning" })
+          return
+        }
+        toast.show({ message: "Reconnected — catching up", variant: "info" })
+        const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+        void result.session.resync(sessionID).catch(() => {})
+      }),
+    )
+
     return result
   },
 })

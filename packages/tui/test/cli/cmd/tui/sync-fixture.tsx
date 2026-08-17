@@ -4,10 +4,12 @@ import { onMount } from "solid-js"
 import { ArgsProvider } from "../../../../src/context/args"
 import { KVProvider, useKV } from "../../../../src/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/context/project"
+import { RouteProvider } from "../../../../src/context/route"
 import { SDKProvider } from "../../../../src/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/context/sync"
 import { PermissionProvider } from "../../../../src/context/permission"
 import { ExitProvider } from "../../../../src/context/exit"
+import { ToastProvider } from "../../../../src/ui/toast"
 import { createEventSource, createFetch, type FetchHandler, directory } from "../../../fixture/tui-sdk"
 import { TestTuiContexts } from "../../../fixture/tui-environment"
 export { createEventSource, createFetch, directory, eventSource, json, worktree } from "../../../fixture/tui-sdk"
@@ -48,17 +50,21 @@ export async function mount(override?: FetchHandler, state?: string) {
     <TestTuiContexts paths={state ? { state } : undefined}>
       <ArgsProvider>
         <KVProvider>
-          <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
-            <PermissionProvider>
-              <ProjectProvider>
-                <ExitProvider exit={() => {}}>
-                  <SyncProvider>
-                    <Probe />
-                  </SyncProvider>
-                </ExitProvider>
-              </ProjectProvider>
-            </PermissionProvider>
-          </SDKProvider>
+          <ToastProvider>
+            <RouteProvider>
+              <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
+                <PermissionProvider>
+                  <ProjectProvider>
+                    <ExitProvider exit={() => {}}>
+                      <SyncProvider>
+                        <Probe />
+                      </SyncProvider>
+                    </ExitProvider>
+                  </ProjectProvider>
+                </PermissionProvider>
+              </SDKProvider>
+            </RouteProvider>
+          </ToastProvider>
         </KVProvider>
       </ArgsProvider>
     </TestTuiContexts>
