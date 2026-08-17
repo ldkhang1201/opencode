@@ -74,6 +74,15 @@ function isolatedEnv(home: string, configJson: string): Record<string, string> {
     OPENCODE_DISABLE_AUTOCOMPACT: "1",
     OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_AUTH_CONTENT: "{}",
+    // The bun-test preload sets OPENCODE_DB=":memory:" for in-process tests,
+    // and subprocesses inherit it via extendEnv — which silently breaks any
+    // test that spans two CLI invocations (nothing persists). Pin a real DB
+    // file, resolved relative to the isolated home's data dir.
+    OPENCODE_DB: "opencode.db",
+    // The preload also exports the experimental engine flags; subprocesses
+    // must match production defaults, not the in-process test configuration.
+    OPENCODE_EXPERIMENTAL_EVENT_SYSTEM: "0",
+    OPENCODE_EXPERIMENTAL_WORKSPACES: "0",
   }
 }
 
@@ -89,7 +98,14 @@ export type RunHandle = {
   readonly result: Effect.Effect<RunResult>
 }
 
-export type SpawnOpts = { readonly timeoutMs?: number; readonly env?: Record<string, string> }
+export type SpawnOpts = {
+  readonly timeoutMs?: number
+  readonly env?: Record<string, string>
+  // Working directory for the child. Defaults to the fixture home. Tests that
+  // simulate a second machine (different project dir + different
+  // OPENCODE_TEST_HOME) pass both cwd and env overrides together.
+  readonly cwd?: string
+}
 
 // Typed equivalent of constructing argv for `opencode run`. New flags should
 // land here so tests stay grep-able and refactor-safe.
@@ -212,8 +228,12 @@ export function withCliFixture<A, E>(
       // consumed as the prompt). The old Process.run wrapper defaulted to
       // ignore; ChildProcess.make defaults to pipe, so we set it explicitly.
       const command = ChildProcess.make("bun", ["run", "--conditions=browser", cliEntry, ...args], {
-        cwd: home,
-        env: { ...env, ...opts?.env },
+        cwd: opts?.cwd ?? home,
+        // PWD must track the child's cwd: the CLI prefers process.env.PWD over
+        // process.cwd() (see cmd/run.ts root resolution), and spawn APIs set
+        // cwd without rewriting the inherited PWD — leaving the parent test
+        // process's PWD would bind the child to the wrong instance directory.
+        env: { PWD: opts?.cwd ?? home, ...env, ...opts?.env },
         extendEnv: true,
         stdin: "ignore",
       })
@@ -284,8 +304,8 @@ export function withCliFixture<A, E>(
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...runArgs(message, opts)], {
-            cwd: home,
-            env: { ...process.env, ...env, ...options?.env },
+            cwd: opts?.cwd ?? home,
+            env: { ...process.env, PWD: opts?.cwd ?? home, ...env, ...options?.env },
             stdin: "ignore",
             stdout: "pipe",
             stderr: "pipe",

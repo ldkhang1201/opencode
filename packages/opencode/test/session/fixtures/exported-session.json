@@ -1,0 +1,149 @@
+{
+  "info": {
+    "id": "ses_ff120d4fcffePucbs4CihQBmC2",
+    "slug": "crisp-squid",
+    "projectID": "global",
+    "directory": "/private/var/folders/b5/3d2pst8j0mz34fgwg_349ls40000gp/T/oc-cli-ZTANPk",
+    "path": "private/var/folders/b5/3d2pst8j0mz34fgwg_349ls40000gp/T/oc-cli-ZTANPk",
+    "title": "E2E Title",
+    "agent": "build",
+    "model": {
+      "id": "test-model",
+      "providerID": "test",
+      "variant": "default"
+    },
+    "version": "local",
+    "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "permission": [
+      {
+        "permission": "question",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_enter",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_exit",
+        "pattern": "*",
+        "action": "deny"
+      }
+    ],
+    "time": {
+      "created": 1786955901699,
+      "updated": 1786955902022
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1786955901720
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "test",
+          "modelID": "test-model"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_00edf2b18001pKqhM6F6RCe2OD",
+        "sessionID": "ses_ff120d4fcffePucbs4CihQBmC2"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "FIXTURE_USER_QUESTION",
+          "id": "prt_00edf2b1b0011tTnKeMuPWwf1W",
+          "sessionID": "ses_ff120d4fcffePucbs4CihQBmC2",
+          "messageID": "msg_00edf2b18001pKqhM6F6RCe2OD"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_00edf2b18001pKqhM6F6RCe2OD",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/private/var/folders/b5/3d2pst8j0mz34fgwg_349ls40000gp/T/oc-cli-ZTANPk",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "test-model",
+        "providerID": "test",
+        "time": {
+          "created": 1786955901832,
+          "completed": 1786955902016
+        },
+        "finish": "stop",
+        "id": "msg_00edf2b88001Oq7ABv3c5c5GIN",
+        "sessionID": "ses_ff120d4fcffePucbs4CihQBmC2"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_00edf2c3b001iGo6BJMiAqiZ2x",
+          "sessionID": "ses_ff120d4fcffePucbs4CihQBmC2",
+          "messageID": "msg_00edf2b88001Oq7ABv3c5c5GIN"
+        },
+        {
+          "type": "text",
+          "text": "FIXTURE_ASSISTANT_REPLY",
+          "time": {
+            "start": 1786955902012,
+            "end": 1786955902013
+          },
+          "id": "prt_00edf2c3c001uWyBXkld7T1QpG",
+          "sessionID": "ses_ff120d4fcffePucbs4CihQBmC2",
+          "messageID": "msg_00edf2b88001Oq7ABv3c5c5GIN"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_00edf2c3e001lhYSuX66xQ8AwO",
+          "sessionID": "ses_ff120d4fcffePucbs4CihQBmC2",
+          "messageID": "msg_00edf2b88001Oq7ABv3c5c5GIN"
+        }
+      ]
+    }
+  ]
+}
