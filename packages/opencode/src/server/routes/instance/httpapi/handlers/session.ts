@@ -36,7 +36,7 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError } from "../errors"
+import { PermissionNotFoundError, SessionTeleportedError } from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -297,12 +297,19 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const message = yield* promptSvc
-        .prompt({
+      const message = yield* SessionError.mapTeleported(
+        promptSvc.prompt({
           ...ctx.payload,
           sessionID: ctx.params.sessionID,
-        })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+        }),
+      ).pipe(
+        Effect.catch(
+          (error): Effect.Effect<never, HttpApiError.BadRequest | SessionTeleportedError> =>
+            error instanceof SessionTeleportedError
+              ? Effect.fail(error)
+              : Effect.fail(new HttpApiError.BadRequest({})),
+        ),
+      )
       return HttpServerResponse.stream(Stream.make(JSON.stringify(message)).pipe(Stream.encodeText), {
         contentType: "application/json",
       })
@@ -333,9 +340,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof CommandPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* promptSvc
-        .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      return yield* SessionError.mapTeleported(
+        promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID }),
+      ).pipe(
+        Effect.catch(
+          (error): Effect.Effect<never, HttpApiError.BadRequest | SessionTeleportedError> =>
+            error instanceof SessionTeleportedError
+              ? Effect.fail(error)
+              : Effect.fail(new HttpApiError.BadRequest({})),
+        ),
+      )
     })
 
     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
@@ -343,7 +357,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof ShellPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
+      return yield* SessionError.mapTeleported(
+        SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })),
+      )
     })
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {

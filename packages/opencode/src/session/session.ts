@@ -410,6 +410,25 @@ export class BusyError extends Schema.TaggedErrorClass<BusyError>()("SessionBusy
   sessionID: SessionID,
 }) {}
 
+export class TeleportedError extends Schema.TaggedErrorClass<TeleportedError>()("SessionTeleportedError", {
+  sessionID: SessionID,
+  target: Schema.String,
+}) {
+  override get message() {
+    return `Session is teleported to ${this.target}. Run \`opencode teleport return\` to bring it back, or \`opencode attach\` to work on it remotely.`
+  }
+}
+
+/** The teleport freeze marker stored in session metadata while a session lives remotely. */
+export function teleportMarker(info: Info): { state: string; target?: string } | undefined {
+  const marker = info.metadata?.["teleport"]
+  if (!marker || typeof marker !== "object") return undefined
+  const state = (marker as Record<string, unknown>)["state"]
+  if (state !== "teleported" && state !== "returning") return undefined
+  const target = (marker as Record<string, unknown>)["target"]
+  return { state, target: typeof target === "string" ? target : undefined }
+}
+
 export type NotFound = NotFoundError
 
 export interface Interface {

@@ -1,7 +1,9 @@
 # Minimal sshd for teleport ssh integration tests.
 # testuser's password must stay in sync with PASSWORD in test/teleport/ssh.test.ts.
+# libgcc/libstdc++ let the released (bun-based, musl) opencode binary run in
+# the teleport E2E; harmless for the plain ssh tests.
 FROM alpine:3.22
-RUN apk add --no-cache openssh \
+RUN apk add --no-cache openssh libgcc libstdc++ \
   && ssh-keygen -A \
   && adduser -D -s /bin/sh testuser \
   && echo 'testuser:opencode-teleport-test-pw' | chpasswd \

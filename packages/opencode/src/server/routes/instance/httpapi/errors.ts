@@ -122,6 +122,34 @@ export class SessionBusyError extends Schema.TaggedErrorClass<SessionBusyError>(
   { httpApiStatus: 409 },
 ) {}
 
+export class SessionTeleportedError extends Schema.TaggedErrorClass<SessionTeleportedError>()(
+  "SessionTeleportedError",
+  {
+    sessionID: Schema.String,
+    target: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 409 },
+) {}
+
+export class TeleportPasswordRequiredError extends Schema.TaggedErrorClass<TeleportPasswordRequiredError>()(
+  "TeleportPasswordRequiredError",
+  {
+    target: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 401 },
+) {}
+
+export class TeleportFailedError extends Schema.TaggedErrorClass<TeleportFailedError>()(
+  "TeleportFailedError",
+  {
+    step: Schema.optional(Schema.String),
+    message: Schema.String,
+  },
+  { httpApiStatus: 500 },
+) {}
+
 export class QuestionNotFoundError extends Schema.TaggedErrorClass<QuestionNotFoundError>()(
   "QuestionNotFoundError",
   {

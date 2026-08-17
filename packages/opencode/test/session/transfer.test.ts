@@ -118,6 +118,52 @@ describe("session transfer lib", () => {
     }),
   )
 
+  it.instance("import metadata option replaces the exported metadata in the same row write", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      const data = fixture()
+      ;(data.info as any).metadata = { teleport: { state: "teleported", target: "user@host" }, keep: "original" }
+      const id = yield* importSession(data, ctx, {
+        overwrite: true,
+        metadata: { teleport: { state: "teleported", target: "elsewhere" } },
+      })
+
+      const svc = yield* SessionNs.Service
+      const info = yield* svc.get(id)
+      expect(info.metadata).toEqual({ teleport: { state: "teleported", target: "elsewhere" } })
+    }),
+  )
+
+  it.instance("import metadata: null strips metadata even when the export carries some", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      const seeded = fixture()
+      ;(seeded.info as any).metadata = { teleport: { state: "teleported", target: "user@host" } }
+      yield* importSession(seeded, ctx, { overwrite: true })
+
+      const svc = yield* SessionNs.Service
+      const id = SessionID.make(seeded.info.id)
+      expect((yield* svc.get(id)).metadata).toEqual({ teleport: { state: "teleported", target: "user@host" } })
+
+      const again = fixture()
+      ;(again.info as any).metadata = { teleport: { state: "teleported", target: "user@host" } }
+      yield* importSession(again, ctx, { overwrite: true, metadata: null })
+      expect((yield* svc.get(id)).metadata).toBeUndefined()
+    }),
+  )
+
+  it.instance("import without the metadata option keeps the exported metadata", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      const data = fixture()
+      ;(data.info as any).metadata = { keep: "me" }
+      const id = yield* importSession(data, ctx, { overwrite: true })
+
+      const svc = yield* SessionNs.Service
+      expect((yield* svc.get(id)).metadata).toEqual({ keep: "me" })
+    }),
+  )
+
   it.instance("exportSession round-trips what importSession wrote", () =>
     Effect.gen(function* () {
       const ctx = yield* requireInstance

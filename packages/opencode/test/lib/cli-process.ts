@@ -155,6 +155,17 @@ export type AcpOpts = SpawnOpts & {
   readonly extraArgs?: string[]
 }
 
+// Generic long-lived CLI invocation (e.g. `opencode teleport ...`): the
+// process outlives the call, stdout is exposed line-by-line so tests can wait
+// for sentinel output, and the scope finalizer kills it.
+export type StartHandle = {
+  // Next stdout line (buffered in a queue; nothing is dropped between takes).
+  readonly nextLine: Effect.Effect<string>
+  readonly stderrTail: () => string
+  readonly kill: (signal?: NodeJS.Signals) => void
+  readonly exited: Promise<number>
+}
+
 export type AcpHandle = {
   // Writes a single JSON-RPC message to the child's stdin as one ndjson line.
   readonly send: (msg: object) => Effect.Effect<void>
@@ -182,6 +193,9 @@ export type OpencodeCli = {
   // Escape hatch: any CLI invocation with full control over argv. Used to test
   // commands that don't yet have a typed builder.
   readonly spawn: (args: string[], opts?: SpawnOpts) => Effect.Effect<RunResult>
+  // Long-lived escape hatch: spawn any CLI invocation and keep it running.
+  // Killed when the caller's Scope closes.
+  readonly start: (args: string[], opts?: SpawnOpts) => Effect.Effect<StartHandle, never, Scope.Scope>
   // Convenience assertion. Dumps captured stderr/stdout on mismatch so CI
   // failures are debuggable without re-running locally.
   readonly expectExit: (result: RunResult, expected: number, label?: string) => void
@@ -405,6 +419,45 @@ export function withCliFixture<A, E>(
       } satisfies ServeHandle
     })
 
+    const start = Effect.fn("opencode.start")(function* (args: string[], opts?: SpawnOpts) {
+      const proc = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...args], {
+            cwd: opts?.cwd ?? home,
+            env: { ...process.env, PWD: opts?.cwd ?? home, ...env, ...opts?.env },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          }),
+        ),
+        (p) =>
+          Effect.promise(() => {
+            p.kill()
+            return p.exited
+          }).pipe(Effect.ignore),
+      )
+
+      const stderrChunks: string[] = []
+      yield* forkStderrDrain(proc.stderr, stderrChunks)
+
+      const lines = yield* Queue.unbounded<string>()
+      yield* Effect.forkScoped(
+        fromBunStream("stdout", () => proc.stdout).pipe(
+          Stream.decodeText(),
+          Stream.splitLines,
+          Stream.runForEach((line) => (line.length === 0 ? Effect.void : Queue.offer(lines, line))),
+          Effect.ignore({ log: true }),
+        ),
+      )
+
+      return {
+        nextLine: Queue.take(lines),
+        stderrTail: () => stderrChunks.join("").slice(-4000),
+        kill: (signal?: NodeJS.Signals) => proc.kill(signal ?? "SIGTERM"),
+        exited: proc.exited as Promise<number>,
+      } satisfies StartHandle
+    })
+
     const acp = Effect.fn("opencode.acp")(function* (opts?: AcpOpts) {
       const argv = ["acp"]
       if (opts?.cwd) argv.push("--cwd", opts.cwd)
@@ -484,7 +537,7 @@ export function withCliFixture<A, E>(
       } satisfies AcpHandle
     })
 
-    const opencode: OpencodeCli = { run, startRun, serve, acp, spawn, expectExit, parseJsonEvents }
+    const opencode: OpencodeCli = { run, startRun, serve, acp, spawn, start, expectExit, parseJsonEvents }
 
     return yield* fn({ llm, home, opencode })
     // FetchHttpClient is provided so test bodies can `yield* HttpClient.HttpClient`

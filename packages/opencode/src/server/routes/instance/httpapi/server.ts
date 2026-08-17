@@ -45,6 +45,7 @@ import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
 import { Snapshot } from "@/snapshot"
 import { Storage } from "@/storage/storage"
+import { Teleport } from "@/teleport"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Worktree } from "@/worktree"
@@ -98,6 +99,7 @@ import { ptyConnectHandlers, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
 import { sessionHandlers } from "./handlers/session"
 import { syncHandlers } from "./handlers/sync"
+import { teleportHandlers } from "./handlers/teleport"
 import { tuiHandlers } from "./handlers/tui"
 import { handlers } from "@opencode-ai/server/handlers"
 import { buildLocationServiceMap, LocationServiceMap } from "@opencode-ai/core/location-services"
@@ -166,6 +168,7 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     providerHandlers,
     sessionHandlers,
     syncHandlers,
+    teleportHandlers,
     tuiHandlers,
     workspaceHandlers,
   ]),
@@ -260,6 +263,7 @@ const app = LayerNode.group([
   Installation.node,
   ShareNext.node,
   SessionShare.node,
+  Teleport.node,
   InstanceStore.node,
   httpClient,
   EventV2.node,

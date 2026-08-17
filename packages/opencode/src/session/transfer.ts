@@ -16,6 +16,10 @@ export type ImportOptions = {
   // Remote-authoritative merge: update the full session row and existing
   // message/part payloads instead of the default additive-only semantics.
   overwrite?: boolean
+  // When provided, replaces info.metadata before the row write (null = strip).
+  // Teleport uses this to keep the local freeze marker out of the remote copy
+  // and to preserve it atomically during opportunistic pulls.
+  metadata?: Record<string, unknown> | null
 }
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
@@ -36,12 +40,19 @@ export const importSession = Effect.fn("SessionTransfer.import")(function* (
   const { db } = yield* Database.Service
   const overwrite = options?.overwrite === true
 
-  const info = Schema.decodeUnknownSync(Session.Info)({
+  const raw: Record<string, unknown> = {
     ...data.info,
     projectID: ctx.project.id,
     directory: ctx.directory,
     path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-  }) as Session.Info
+  }
+  if (options?.metadata !== undefined) {
+    // The schema rejects an explicit `metadata: undefined` key, so stripping
+    // (metadata: null) must remove the key entirely.
+    if (options.metadata === null) delete raw.metadata
+    else raw.metadata = options.metadata
+  }
+  const info = Schema.decodeUnknownSync(Session.Info)(raw) as Session.Info
   const row = Session.toRow(info)
   const { id: _id, ...rowWithoutID } = row
   yield* db
@@ -49,7 +60,11 @@ export const importSession = Effect.fn("SessionTransfer.import")(function* (
     .values(row)
     .onConflictDoUpdate({
       target: SessionTable.id,
-      set: overwrite ? rowWithoutID : { project_id: row.project_id, directory: row.directory, path: row.path },
+      set: overwrite
+        ? // drizzle skips undefined fields in updates, so an absent metadata
+          // must be written as an explicit null to clear the column.
+          { ...rowWithoutID, metadata: rowWithoutID.metadata ?? null }
+        : { project_id: row.project_id, directory: row.directory, path: row.path },
     })
     .run()
     .pipe(Effect.orDie)

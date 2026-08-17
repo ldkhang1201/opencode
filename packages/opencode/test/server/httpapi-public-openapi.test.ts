@@ -264,13 +264,30 @@ describe("PublicApi OpenAPI v2 errors", () => {
     const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
 
     for (const route of [
-      ["post", "/session/{sessionID}/shell"],
       ["post", "/session/{sessionID}/revert"],
       ["post", "/session/{sessionID}/unrevert"],
       ["delete", "/session/{sessionID}/message/{messageID}"],
     ] as const) {
       expect(componentName(responseRef(spec.paths[route[1]]?.[route[0]]?.responses?.["409"]) ?? "")).toBe(
         "SessionBusyError",
+      )
+    }
+    // shell can also 409 with the teleport freeze, so its 409 is a union
+    expect(componentNames(spec.paths["/session/{sessionID}/shell"]?.post?.responses?.["409"]).sort()).toEqual([
+      "SessionBusyError",
+      "SessionTeleportedError",
+    ])
+  })
+
+  test("documents session teleported errors", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+
+    for (const route of [
+      ["post", "/session/{sessionID}/message"],
+      ["post", "/session/{sessionID}/command"],
+    ] as const) {
+      expect(componentName(responseRef(spec.paths[route[1]]?.[route[0]]?.responses?.["409"]) ?? "")).toBe(
+        "SessionTeleportedError",
       )
     }
   })
