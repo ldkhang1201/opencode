@@ -1,0 +1,713 @@
+/**
+ * SSH transport for /teleport.
+ *
+ * Uses the system `ssh` / `ssh-keygen` binaries only (never a JS ssh library).
+ * A one-time ControlMaster connection (`open`) is the bootstrap channel used to
+ * probe, push files, and install a per-teleport ephemeral key; a supervised,
+ * auto-respawning `ssh -N -L` tunnel (`tunnel`) authenticates with that key so
+ * it survives master death. Everything is designed to be respawnable and
+ * idempotent because the network is assumed to be flaky.
+ *
+ * Target syntax: `host`, `user@host`, `user@host:/abs/path`, `user@host:~/path`.
+ * A `:` suffix is only ever a *path* (it must start with `/` or `~`);
+ * `user@host:2222` is NOT a supported way to pick a port. Ports (and any other
+ * connection tweaks) come from the user's ssh config (`Port` in
+ * `~/.ssh/config`). Tests and internal callers may inject flags like `-p` via
+ * the `extraArgs` option on `open`/`tunnel`.
+ */
+import { spawn, type ChildProcess } from "node:child_process"
+import fs from "node:fs/promises"
+import net from "node:net"
+import os from "node:os"
+import path from "node:path"
+import { Schema } from "effect"
+import { NamedError } from "@opencode-ai/core/util/error"
+
+export interface Target {
+  user?: string
+  host: string
+  path?: string
+}
+
+export const TargetParseError = NamedError.create("TeleportSshTargetParseError", {
+  input: Schema.String,
+  message: Schema.String,
+})
+export type TargetParseError = InstanceType<typeof TargetParseError>
+
+export const SshOpenError = NamedError.create("TeleportSshOpenError", {
+  destination: Schema.String,
+  exitCode: Schema.optional(Schema.Number),
+  stderr: Schema.String,
+  /** true when stderr looks like an authentication failure — the caller should retry `open` with a password */
+  authFailure: Schema.Boolean,
+})
+export type SshOpenError = InstanceType<typeof SshOpenError>
+
+export const SshCommandError = NamedError.create("TeleportSshCommandError", {
+  message: Schema.String,
+  exitCode: Schema.optional(Schema.Number),
+  stderr: Schema.optional(Schema.String),
+})
+export type SshCommandError = InstanceType<typeof SshCommandError>
+
+const VALID_USER = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
+const VALID_HOST = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * Parse `host`, `user@host`, or `user@host:<path>` where `<path>` starts with
+ * `/` or `~`. Ports are intentionally unsupported in the target string
+ * (`user@host:2222` is an error) — set `Port` in ssh config instead.
+ */
+export function parseTarget(input: string): Target | TargetParseError {
+  const fail = (message: string) => new TargetParseError({ input, message })
+  const trimmed = input.trim()
+  if (!trimmed) return fail("target is empty")
+
+  let user: string | undefined
+  let rest = trimmed
+  const at = trimmed.indexOf("@")
+  if (at !== -1) {
+    user = trimmed.slice(0, at)
+    rest = trimmed.slice(at + 1)
+    if (!user) return fail("user before '@' is empty")
+    if (!VALID_USER.test(user)) return fail(`invalid user: ${JSON.stringify(user)}`)
+  }
+
+  let host = rest
+  let dir: string | undefined
+  const colon = rest.indexOf(":")
+  if (colon !== -1) {
+    host = rest.slice(0, colon)
+    dir = rest.slice(colon + 1)
+    if (/^\d+$/.test(dir))
+      return fail(
+        `"${host}:${dir}" looks like a port — ports are not supported in the target; set "Port ${dir}" for this host in your ssh config instead`,
+      )
+    if (!dir.startsWith("/") && !dir.startsWith("~"))
+      return fail(`path after ':' must start with '/' or '~', got ${JSON.stringify(dir)}`)
+  }
+  if (!host) return fail("host is empty")
+  if (!VALID_HOST.test(host)) return fail(`invalid host: ${JSON.stringify(host)}`)
+
+  const target: Target = { host }
+  if (user !== undefined) target.user = user
+  if (dir !== undefined) target.path = dir
+  return target
+}
+
+export function destination(target: Target): string {
+  return target.user ? `${target.user}@${target.host}` : target.host
+}
+
+export interface MasterHandle {
+  readonly target: Target
+  readonly destination: string
+  readonly controlPath: string
+  /** extra ssh flags (e.g. `-p` in tests); reused for every command on this master */
+  readonly extraArgs: string[]
+}
+
+export interface OpenOptions {
+  controlPath: string
+  password?: string
+  /** internal/test hook: extra ssh CLI flags, e.g. ["-p", "2222"] */
+  extraArgs?: string[]
+  /** overall deadline for establishing the master, default 60s */
+  timeoutMs?: number
+}
+
+/** POSIX single-quote so a value is always one shell word and never expanded. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+/**
+ * One-shot SSH_ASKPASS helper: prints the secret from `passwordFile` on the
+ * first invocation and deletes the file so it can never be read again. The
+ * secret itself is never embedded in the script, argv, or the environment.
+ */
+export function askpassScript(passwordFile: string): string {
+  return [
+    "#!/bin/sh",
+    "# one-shot askpass helper generated by opencode /teleport",
+    `f=${shellQuote(passwordFile)}`,
+    'cat -- "$f" 2>/dev/null',
+    'rm -f -- "$f"',
+    "",
+  ].join("\n")
+}
+
+const AUTH_FAILURE =
+  /permission denied|authentication failed|too many authentication failures|host key verification failed/i
+
+/**
+ * Establish a ControlMaster connection. Without a password this uses
+ * BatchMode (fails fast if key auth is unavailable — catch `SshOpenError`
+ * with `authFailure: true` and retry with a password). With a password the
+ * secret is delivered through a one-shot SSH_ASKPASS helper; ssh is spawned
+ * detached (setsid, no TTY) so askpass engages on both macOS and Linux.
+ */
+export async function open(target: Target, opts: OpenOptions): Promise<MasterHandle> {
+  const dest = destination(target)
+  const extraArgs = [...(opts.extraArgs ?? [])]
+  const args = [
+    "-f",
+    "-N",
+    "-o",
+    "ControlMaster=yes",
+    "-o",
+    `ControlPath=${opts.controlPath}`,
+    "-o",
+    "ControlPersist=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "ConnectTimeout=10",
+  ]
+  if (opts.password === undefined) args.push("-o", "BatchMode=yes")
+  else args.push("-o", "BatchMode=no", "-o", "NumberOfPasswordPrompts=1")
+  args.push(...extraArgs, "--", dest)
+
+  let askpassDir: string | undefined
+  let env: NodeJS.ProcessEnv | undefined
+  if (opts.password !== undefined) {
+    // 0700 dir, 0600 secret file, 0700 helper; the helper deletes the secret
+    // after the first read and the whole dir is removed after auth.
+    askpassDir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-teleport-askpass-"))
+    await fs.chmod(askpassDir, 0o700)
+    const passwordFile = path.join(askpassDir, "secret")
+    await fs.writeFile(passwordFile, opts.password, { mode: 0o600 })
+    const helper = path.join(askpassDir, "askpass.sh")
+    await fs.writeFile(helper, askpassScript(passwordFile), { mode: 0o700 })
+    env = {
+      ...process.env,
+      SSH_ASKPASS: helper,
+      SSH_ASKPASS_REQUIRE: "force",
+      // older OpenSSH additionally requires DISPLAY to consider askpass at all
+      DISPLAY: process.env["DISPLAY"] ?? ":0",
+    }
+  }
+
+  try {
+    const proc = spawn("ssh", args, {
+      // detached => own session, no controlling TTY: ssh cannot fall back to
+      // /dev/tty and must use SSH_ASKPASS (required on Linux; harmless on macOS)
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+      env,
+    })
+    const result = await waitMaster(proc, opts.timeoutMs ?? 60_000)
+    if (result.code !== 0) {
+      const stderr = result.stderr.toString("utf8")
+      throw new SshOpenError({
+        destination: dest,
+        exitCode: result.code,
+        stderr,
+        authFailure: AUTH_FAILURE.test(stderr),
+      })
+    }
+  } finally {
+    if (askpassDir) await fs.rm(askpassDir, { recursive: true, force: true }).catch(() => undefined)
+  }
+
+  return { target, destination: dest, controlPath: opts.controlPath, extraArgs }
+}
+
+export interface ExecOptions {
+  /** binary-safe payload the script can read from its own stdin (script is brace-wrapped so sh does not consume it) */
+  stdin?: string | Uint8Array
+}
+
+export interface ExecResult {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+/**
+ * Encode the stdin stream for `ssh ... sh -s`. Without a payload the script
+ * passes through as-is. With a payload, everything sent to the remote shell
+ * must stay *textual*: appending raw bytes after the script does NOT work
+ * because busybox ash (unlike bash/dash) reads stdin in 1KiB blocks and
+ * swallows payload bytes into its parse buffer. Instead the payload travels
+ * as a base64 quoted-heredoc that is decoded and piped into a shell function
+ * wrapping the user script, so the script sees exactly the payload on its
+ * stdin. Requires `base64 -d` on the remote (busybox, coreutils, macOS: yes).
+ */
+export function encodeExecInput(script: string, stdin?: string | Uint8Array): Uint8Array {
+  const encoder = new TextEncoder()
+  if (stdin === undefined) return encoder.encode(script.endsWith("\n") ? script : `${script}\n`)
+  const payload = typeof stdin === "string" ? encoder.encode(stdin) : stdin
+  const b64 = Buffer.from(payload).toString("base64")
+  const lines: string[] = []
+  for (let i = 0; i < b64.length; i += 76) lines.push(b64.slice(i, i + 76))
+  // "_" never occurs in base64 output, so the marker cannot collide with the body
+  const marker = "OPENCODE_TELEPORT_PAYLOAD_EOF"
+  return encoder.encode(
+    [
+      "opencode_teleport_main() {",
+      script,
+      "}",
+      `base64 -d <<'${marker}' | opencode_teleport_main`,
+      ...lines,
+      marker,
+      "",
+    ].join("\n"),
+  )
+}
+
+/** Run a script on the remote host via the master. The script travels over stdin, never argv. */
+export async function exec(master: MasterHandle, script: string, opts: ExecOptions = {}): Promise<ExecResult> {
+  const args = [...masterArgs(master), "--", master.destination, "sh", "-s"]
+  const result = await runSsh(args, { stdin: encodeExecInput(script, opts.stdin) })
+  return {
+    code: result.code,
+    stdout: result.stdout.toString("utf8"),
+    stderr: result.stderr.toString("utf8"),
+  }
+}
+
+/** Remote command used by {@link push}: stream to a temp file, chmod, then atomically rename. */
+export function pushCommand(remotePath: string, tmpPath: string, mode: string): string {
+  const dir = path.posix.dirname(remotePath)
+  return `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(tmpPath)} && chmod ${shellQuote(mode)} ${shellQuote(tmpPath)} && mv -f ${shellQuote(tmpPath)} ${shellQuote(remotePath)}`
+}
+
+export interface PushOptions {
+  /** a Blob, or a local file path to stream */
+  content: Blob | string
+  remotePath: string
+  /** chmod mode for the final file, default "0644" */
+  mode?: string
+  /** called with cumulative bytes written */
+  onProgress?: (bytes: number) => void
+}
+
+/** Stream a file to the remote host; the write is atomic per-file (tmp + rename). */
+export async function push(master: MasterHandle, opts: PushOptions): Promise<void> {
+  const mode = opts.mode ?? "0644"
+  const tmpPath = `${opts.remotePath}.opencode-teleport-${Math.random().toString(36).slice(2, 10)}`
+  const command = pushCommand(opts.remotePath, tmpPath, mode)
+  const blob = typeof opts.content === "string" ? Bun.file(opts.content) : opts.content
+
+  const proc = spawn("ssh", [...masterArgs(master), "--", master.destination, command], {
+    stdio: ["pipe", "ignore", "pipe"],
+  })
+  const stderr: Buffer[] = []
+  proc.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+  const exited = new Promise<number>((resolve, reject) => {
+    proc.once("error", reject)
+    proc.once("close", (code) => resolve(code ?? 1))
+  })
+
+  const stdin = proc.stdin
+  if (!stdin) throw new SshCommandError({ message: "push: ssh stdin unavailable" })
+  stdin.on("error", () => undefined) // EPIPE when the remote command fails early
+
+  let transferred = 0
+  const reader = blob.stream().getReader()
+  try {
+    while (true) {
+      if (proc.exitCode !== null) break // remote died; stop streaming, report below
+      const { done, value } = await reader.read()
+      if (done) break
+      const flushed = stdin.write(Buffer.from(value))
+      transferred += value.byteLength
+      if (!flushed)
+        await Promise.race([
+          new Promise<void>((resolve) => stdin.once("drain", () => resolve())),
+          exited.catch(() => undefined),
+        ])
+      opts.onProgress?.(transferred)
+    }
+  } catch (cause) {
+    // local read failed: kill the remote side so the temp file never becomes visible
+    proc.kill("SIGTERM")
+    await exited.catch(() => undefined)
+    throw cause
+  } finally {
+    reader.releaseLock()
+  }
+  stdin.end()
+
+  const code = await exited
+  if (code !== 0)
+    throw new SshCommandError({
+      message: `push to ${opts.remotePath} failed`,
+      exitCode: code,
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    })
+}
+
+const VALID_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** authorized_keys comment marker for a teleport tag; validates the tag. */
+export function keyMarker(tag: string): string {
+  if (!VALID_TAG.test(tag))
+    throw new SshCommandError({ message: `invalid teleport tag ${JSON.stringify(tag)}: use [A-Za-z0-9._-]` })
+  return `opencode-teleport-${tag}`
+}
+
+/** Remote script that appends the tagged public key to authorized_keys once (grep before append). */
+export function installKeyScript(publicKeyLine: string, tag: string): string {
+  const marker = keyMarker(tag)
+  const line = publicKeyLine.trim()
+  if (!line || line.includes("\n")) throw new SshCommandError({ message: "public key must be a single non-empty line" })
+  return [
+    "set -eu",
+    "umask 077",
+    'dir="$HOME/.ssh"',
+    'file="$dir/authorized_keys"',
+    'mkdir -p "$dir"',
+    'chmod 700 "$dir"',
+    'touch "$file"',
+    'chmod 600 "$file"',
+    `if ! grep -qF -- ${shellQuote(marker)} "$file"; then`,
+    `  printf '%s\\n' ${shellQuote(line)} >> "$file"`,
+    "fi",
+  ].join("\n")
+}
+
+/** Remote script that removes every line tagged for `tag` from authorized_keys; a no-op when absent. */
+export function removeKeyScript(tag: string): string {
+  const marker = keyMarker(tag)
+  const pattern = `${marker.replace(/[.[\]*^$\\]/g, "\\$&")}$`
+  return [
+    "set -eu",
+    'file="$HOME/.ssh/authorized_keys"',
+    '[ -e "$file" ] || exit 0',
+    'tmp="$file.opencode-teleport.$$"',
+    `grep -v -- ${shellQuote(pattern)} "$file" > "$tmp" || true`,
+    'chmod 600 "$tmp"',
+    'mv -f "$tmp" "$file"',
+  ].join("\n")
+}
+
+/**
+ * Generate (once) a passphrase-less ed25519 key under `keyDir` (0700/0600)
+ * and append its tagged public key to the remote authorized_keys. Idempotent
+ * on both sides.
+ */
+export async function installKey(
+  master: MasterHandle,
+  tag: string,
+  keyDir: string,
+): Promise<{ privateKeyPath: string }> {
+  const marker = keyMarker(tag)
+  await fs.mkdir(keyDir, { recursive: true, mode: 0o700 })
+  await fs.chmod(keyDir, 0o700)
+  const privateKeyPath = path.join(keyDir, marker)
+
+  const hasKey = await fs.access(privateKeyPath).then(
+    () => true,
+    () => false,
+  )
+  if (!hasKey) {
+    const keygen = await runProcess(
+      "ssh-keygen",
+      ["-q", "-t", "ed25519", "-N", "", "-C", marker, "-f", privateKeyPath],
+      { timeoutMs: 30_000 },
+    )
+    if (keygen.code !== 0)
+      throw new SshCommandError({
+        message: `ssh-keygen failed for ${privateKeyPath}`,
+        exitCode: keygen.code,
+        stderr: keygen.stderr.toString("utf8"),
+      })
+  }
+  await fs.chmod(privateKeyPath, 0o600)
+
+  const publicKey = (await fs.readFile(`${privateKeyPath}.pub`, "utf8")).trim()
+  const result = await exec(master, installKeyScript(publicKey, tag))
+  if (result.code !== 0)
+    throw new SshCommandError({
+      message: `installKey ${tag} failed on ${master.destination}`,
+      exitCode: result.code,
+      stderr: result.stderr,
+    })
+  return { privateKeyPath }
+}
+
+/** Remove the tagged key line from the remote authorized_keys. Idempotent. */
+export async function removeKey(master: MasterHandle, tag: string): Promise<void> {
+  const result = await exec(master, removeKeyScript(tag))
+  if (result.code !== 0)
+    throw new SshCommandError({
+      message: `removeKey ${tag} failed on ${master.destination}`,
+      exitCode: result.code,
+      stderr: result.stderr,
+    })
+}
+
+/** Reconnect backoff: 1s, 2s, 4s, ... capped at 30s. `attempt` is 1-based. */
+export function backoffDelay(attempt: number): number {
+  const n = Math.max(1, Math.floor(attempt))
+  return Math.min(1_000 * 2 ** (n - 1), 30_000)
+}
+
+const BACKOFF_RESET_MS = 60_000
+
+export type TunnelState = "connecting" | "connected" | "reconnecting" | "stopped"
+
+export interface TunnelOptions {
+  target: Target
+  identityFile: string
+  localPort: number
+  remotePort: number
+  onStateChange?: (state: TunnelState) => void
+  /** internal/test hook: extra ssh CLI flags, e.g. ["-p", "2222"] */
+  extraArgs?: string[]
+}
+
+export interface TunnelHandle {
+  readonly state: TunnelState
+  /** kill the tunnel and disable respawning */
+  stop(): Promise<void>
+}
+
+/**
+ * Supervised `ssh -N -L` port forward, authenticated ONLY with the teleport
+ * key (never the ControlMaster — it must survive master death). Respawns on
+ * exit with 1s→30s exponential backoff; the backoff resets after the process
+ * has been up for 60s.
+ */
+export function tunnel(opts: TunnelOptions): TunnelHandle {
+  const dest = destination(opts.target)
+  const args = [
+    "-N",
+    "-o",
+    "ExitOnForwardFailure=yes",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "IdentitiesOnly=yes",
+    // hard-disable multiplexing so ambient ssh config cannot tie us to a master
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-i",
+    opts.identityFile,
+    "-L",
+    `127.0.0.1:${opts.localPort}:127.0.0.1:${opts.remotePort}`,
+    ...(opts.extraArgs ?? []),
+    "--",
+    dest,
+  ]
+
+  let state: TunnelState = "connecting"
+  let stopped = false
+  let child: ChildProcess | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let attempt = 0
+  let generation = 0
+
+  const setState = (next: TunnelState) => {
+    if (stopped && next !== "stopped") return
+    if (state === next) return
+    state = next
+    opts.onStateChange?.(next)
+  }
+  opts.onStateChange?.("connecting")
+
+  // ssh binds the -L listener only after auth succeeds, so a successful
+  // loopback connect is our "connected" signal.
+  const watchConnected = async (gen: number, proc: ChildProcess) => {
+    while (!stopped && gen === generation && proc.exitCode === null && proc.signalCode === null) {
+      if (await canConnect(opts.localPort)) {
+        if (!stopped && gen === generation && proc.exitCode === null) setState("connected")
+        return
+      }
+      await sleep(200)
+    }
+  }
+
+  const respawn = () => {
+    if (stopped) return
+    generation += 1
+    const gen = generation
+    const startedAt = Date.now()
+    const proc = spawn("ssh", args, { stdio: ["ignore", "ignore", "ignore"] })
+    child = proc
+    void watchConnected(gen, proc)
+    let settled = false
+    const down = () => {
+      if (settled) return
+      settled = true
+      if (child === proc) child = undefined
+      if (stopped) return
+      if (Date.now() - startedAt >= BACKOFF_RESET_MS) attempt = 0
+      attempt += 1
+      setState("reconnecting")
+      timer = setTimeout(respawn, backoffDelay(attempt))
+    }
+    proc.once("exit", down)
+    proc.once("error", down)
+  }
+  respawn()
+
+  return {
+    get state() {
+      return state
+    },
+    stop: async () => {
+      if (stopped) return
+      stopped = true
+      if (timer) clearTimeout(timer)
+      const proc = child
+      child = undefined
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        const gone = new Promise<void>((resolve) => proc.once("exit", () => resolve()))
+        proc.kill("SIGTERM")
+        const hardKill = setTimeout(() => proc.kill("SIGKILL"), 3_000)
+        await gone
+        clearTimeout(hardKill)
+      }
+      state = "stopped"
+      opts.onStateChange?.("stopped")
+    },
+  }
+}
+
+/** Pick a free loopback port (bind-and-release; a tiny race window is inherent). */
+export function freePort(): number {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: { data() {} },
+  })
+  const port = listener.port
+  listener.stop(true)
+  return port
+}
+
+/** Ask the master to exit (`ssh -O exit`) and remove the control socket. Safe to call twice. */
+export async function close(master: MasterHandle): Promise<void> {
+  await runSsh(
+    ["-O", "exit", "-o", `ControlPath=${master.controlPath}`, ...master.extraArgs, "--", master.destination],
+    { timeoutMs: 10_000 },
+  ).catch(() => undefined)
+  await fs.rm(master.controlPath, { force: true }).catch(() => undefined)
+}
+
+// ---------------------------------------------------------------------------
+// internals
+// ---------------------------------------------------------------------------
+
+function masterArgs(master: MasterHandle): string[] {
+  return [
+    "-o",
+    `ControlPath=${master.controlPath}`,
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    ...master.extraArgs,
+  ]
+}
+
+interface Collected {
+  code: number
+  stdout: Buffer
+  stderr: Buffer
+}
+
+function runProcess(
+  command: string,
+  args: string[],
+  opts: { stdin?: Uint8Array; timeoutMs?: number } = {},
+): Promise<Collected> {
+  const proc = spawn(command, args, {
+    stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+  })
+  if (opts.stdin !== undefined && proc.stdin) {
+    proc.stdin.on("error", () => undefined)
+    proc.stdin.end(Buffer.from(opts.stdin.buffer, opts.stdin.byteOffset, opts.stdin.byteLength))
+  }
+  return new Promise<Collected>((resolve, reject) => {
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    proc.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
+    proc.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+    const timer = opts.timeoutMs ? setTimeout(() => proc.kill("SIGKILL"), opts.timeoutMs) : undefined
+    proc.once("error", (error) => {
+      if (timer) clearTimeout(timer)
+      reject(error)
+    })
+    proc.once("close", (code) => {
+      if (timer) clearTimeout(timer)
+      resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) })
+    })
+  })
+}
+
+function runSsh(args: string[], opts: { stdin?: Uint8Array; timeoutMs?: number } = {}): Promise<Collected> {
+  return runProcess("ssh", args, opts)
+}
+
+/**
+ * Wait for a `ssh -f` master to establish. With `-f` the parent exits once
+ * the master is up, but the daemonized master inherits stderr — so on success
+ * we must resolve on "exit" (waiting for "close" would block until the master
+ * dies). On failure we give stderr a moment to flush via "close".
+ */
+function waitMaster(proc: ChildProcess, timeoutMs: number): Promise<Collected> {
+  return new Promise<Collected>((resolve, reject) => {
+    const stderr: Buffer[] = []
+    proc.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+    const finish = (code: number) => resolve({ code, stdout: Buffer.alloc(0), stderr: Buffer.concat(stderr) })
+    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs)
+    proc.once("error", (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    proc.once("exit", (code) => {
+      clearTimeout(timer)
+      const exitCode = code ?? 1
+      if (exitCode === 0) {
+        finish(0)
+        return
+      }
+      const flush = setTimeout(() => finish(exitCode), 2_000)
+      proc.once("close", () => {
+        clearTimeout(flush)
+        finish(exitCode)
+      })
+    })
+  })
+}
+
+function canConnect(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port })
+    const timer = setTimeout(() => {
+      socket.destroy()
+      resolve(false)
+    }, 1_000)
+    socket.once("connect", () => {
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(true)
+    })
+    socket.once("error", () => {
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(false)
+    })
+  })
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export * as TeleportSsh from "./ssh"
