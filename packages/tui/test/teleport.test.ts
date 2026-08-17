@@ -7,6 +7,9 @@ import {
   isLocalTransportUrl,
   isPasswordRequiredBody,
   jumpUrl,
+  pickerActions,
+  pickerDescription,
+  pickerEmptyBehavior,
   returnableState,
   targetLabel,
   teleportMetadata,
@@ -58,6 +61,29 @@ describe("returnableState", () => {
     expect(returnableState("returning")).toBe(true)
     expect(returnableState("failed")).toBe(false)
     expect(returnableState("bootstrapping")).toBe(false)
+  })
+})
+
+describe("picker mode helpers", () => {
+  test("/teleport picker: Enter jumps, the bound action returns", () => {
+    expect(pickerActions("jump")).toEqual({ primary: "jump", secondary: "return" })
+  })
+
+  test("/list picker: Enter returns here, the bound action jumps", () => {
+    expect(pickerActions("return")).toEqual({ primary: "return", secondary: "jump" })
+  })
+
+  test("returning entries invite a retry only when Enter is the return", () => {
+    expect(pickerDescription("returning", "return")).toBe("return pending — select to retry")
+    expect(pickerDescription("returning", "jump")).toBe("returning")
+    expect(pickerDescription("teleported", "return")).toBe("teleported")
+    expect(pickerDescription("teleported", "jump")).toBe("teleported")
+    expect(pickerDescription("failed", "return")).toBe("failed")
+  })
+
+  test("an empty picker falls through to the target prompt only in jump mode", () => {
+    expect(pickerEmptyBehavior("jump")).toBe("prompt")
+    expect(pickerEmptyBehavior("return")).toBe("close")
   })
 })
 

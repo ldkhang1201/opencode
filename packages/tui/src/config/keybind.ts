@@ -212,6 +212,7 @@ export const Definitions = {
   "dialog.move_session.delete": keybind("ctrl+d", "Delete project copy"),
   "dialog.move_session.refresh": keybind("ctrl+r", "Refresh project copies"),
   "dialog.teleport.return": keybind("ctrl+r", "Return the selected teleported session here"),
+  "dialog.teleport.jump": keybind("ctrl+j", "Jump to the selected teleported session"),
   "prompt.autocomplete.prev": keybind("up,ctrl+p", "Move to previous autocomplete item"),
   "prompt.autocomplete.next": keybind("down,ctrl+n", "Move to next autocomplete item"),
   "prompt.autocomplete.hide": keybind("escape", "Hide autocomplete"),

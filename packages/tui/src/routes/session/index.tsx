@@ -644,6 +644,18 @@ export function Session() {
       },
     },
     {
+      title: "List teleported sessions",
+      value: "session.teleport.list",
+      category: "Session",
+      slash: {
+        name: "list",
+        aliases: ["teleported"],
+      },
+      run: () => {
+        dialog.replace(() => <DialogTeleport primary="return" />)
+      },
+    },
+    {
       title: "Undo previous message",
       value: "session.undo",
       category: "Session",

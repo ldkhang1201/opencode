@@ -288,7 +288,7 @@ export interface Interface {
   readonly status: (sessionID: SessionID) => Effect.Effect<TeleportState.State | undefined>
   /** stop this process's tunnel + pull loop without touching the remote (the session stays teleported) */
   readonly disconnect: (sessionID: SessionID) => Effect.Effect<void>
-  /** crash recovery on server start: re-establish tunnels/pulls, retry returns */
+  /** crash recovery on server start: re-establish tunnels/pulls for "teleported" sessions; never initiates returns */
   readonly recover: () => Effect.Effect<void>
 }
 
@@ -807,8 +807,8 @@ const layer: Layer.Layer<
       if (!st) return yield* new NotTeleportedError({ sessionID })
       // Only a live (or already returning) teleport can be returned: a
       // failed/bootstrapping one has no remote server to export from, and
-      // persisting "returning" would wedge recover() into retrying an
-      // impossible export forever while start() refuses to resume.
+      // persisting "returning" would advertise an impossible "return pending"
+      // retry while start() refuses to resume.
       if (st.state !== "teleported" && st.state !== "returning")
         return yield* new TeleportError({
           step: "return",
@@ -952,20 +952,13 @@ const layer: Layer.Layer<
       for (const st of states) {
         if (registry.has(st.sessionID)) continue
         const sessionID = SessionID.make(st.sessionID)
+        // Only "teleported" sessions are reconnected (tunnel + read-only pull
+        // mirror). A "returning" state file is deliberately left alone: returns
+        // are user-initiated only, so an interrupted one stays "return pending"
+        // until the user retries it (/list picker or `opencode teleport return`).
         if (st.state === "teleported") {
           yield* connect(st, "recover").pipe(
             Effect.catchCause((cause) => Effect.logWarning("teleport recovery failed", { sessionID, cause })),
-            Effect.forkIn(scope),
-          )
-        }
-        if (st.state === "returning") {
-          yield* ret(sessionID).pipe(
-            Effect.retry(
-              Schedule.exponential(Duration.seconds(5)).pipe(
-                Schedule.both(Schedule.recurs(10)),
-              ),
-            ),
-            Effect.catchCause((cause) => Effect.logWarning("teleport return retry failed", { sessionID, cause })),
             Effect.forkIn(scope),
           )
         }

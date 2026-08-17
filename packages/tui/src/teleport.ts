@@ -102,6 +102,37 @@ export function returnableState(state: TeleportStatus["state"]): boolean {
   return state === "teleported" || state === "returning"
 }
 
+/**
+ * Which operation Enter runs in the teleport picker: `/teleport` is
+ * jump-first, `/list` is return-first (call the session back here).
+ */
+export type TeleportPickerMode = "jump" | "return"
+
+export type TeleportPickerOp = "jump" | "return"
+
+/** mode → Enter (primary) and bound-action (secondary) operations */
+export function pickerActions(mode: TeleportPickerMode): { primary: TeleportPickerOp; secondary: TeleportPickerOp } {
+  if (mode === "return") return { primary: "return", secondary: "jump" }
+  return { primary: "jump", secondary: "return" }
+}
+
+/**
+ * Entry state label. An interrupted return (state "returning") persists until
+ * the user retries it; in return-first mode Enter is that retry, so say so.
+ */
+export function pickerDescription(state: TeleportStatus["state"], mode: TeleportPickerMode): string {
+  if (mode === "return" && state === "returning") return "return pending — select to retry"
+  return state
+}
+
+/**
+ * With nothing teleported, `/teleport` falls through to the target prompt
+ * (start a new teleport); `/list` has nothing to call back, so it closes.
+ */
+export function pickerEmptyBehavior(mode: TeleportPickerMode): "prompt" | "close" {
+  return mode === "jump" ? "prompt" : "close"
+}
+
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "opencode.internal"])
 
 /**

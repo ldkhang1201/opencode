@@ -48,7 +48,8 @@ export const teleportHandlers = HttpApiBuilder.group(InstanceHttpApi, "teleport"
     const scope = yield* Scope.Scope
 
     // Crash recovery at server start: re-establish tunnels + pull loops for
-    // "teleported" sessions, retry "returning" ones in the background.
+    // "teleported" sessions. Never initiates returns — "returning" state
+    // files wait for an explicit user action (/list picker, teleport return).
     yield* teleport.recover().pipe(
       Effect.catchCause((cause) => Effect.logWarning("teleport recovery failed", { cause })),
       Effect.forkIn(scope),

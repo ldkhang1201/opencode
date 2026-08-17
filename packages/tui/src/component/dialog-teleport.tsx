@@ -19,15 +19,19 @@ import {
   handoffFromInfo,
   handoffFromStatus,
   isLocalTransportUrl,
+  pickerActions,
+  pickerDescription,
+  pickerEmptyBehavior,
   returnableState,
   targetLabel,
   TeleportPasswordRequired,
+  type TeleportPickerMode,
   type TeleportStatus,
 } from "../teleport"
 
 type Stage = "loading" | "picker" | "target" | "password" | "progress"
 
-export function DialogTeleport(props: { target?: string }) {
+export function DialogTeleport(props: { target?: string; primary?: TeleportPickerMode }) {
   const dialog = useDialog()
   const sdk = useSDK()
   const sync = useSync()
@@ -35,7 +39,8 @@ export function DialogTeleport(props: { target?: string }) {
   const exit = useExit()
   const toast = useToast()
   const { theme } = useTheme()
-  const jumpShortcut = useCommandShortcut("dialog.select.submit")
+  const submitShortcut = useCommandShortcut("dialog.select.submit")
+  const mode = () => props.primary ?? "jump"
 
   const client = createTeleportClient({
     url: sdk.url,
@@ -56,6 +61,16 @@ export function DialogTeleport(props: { target?: string }) {
     disposed = true
   })
 
+  // /list has nothing to fall through to: close instead of the target prompt
+  function empty(message: string, variant: "info" | "error") {
+    if (pickerEmptyBehavior(mode()) === "close") {
+      toast.show({ message, variant })
+      dialog.clear()
+      return
+    }
+    setStage("target")
+  }
+
   onMount(() => {
     if (props.target) return
     client
@@ -63,15 +78,15 @@ export function DialogTeleport(props: { target?: string }) {
       .then((list) => {
         if (disposed) return
         if (list.length === 0) {
-          setStage("target")
+          empty("No teleported sessions", "info")
           return
         }
         setTeleports(list)
         dialog.setSize("large")
         setStage("picker")
       })
-      .catch(() => {
-        if (!disposed) setStage("target")
+      .catch((error) => {
+        if (!disposed) empty(errorMessage(error), "error")
       })
   })
 
@@ -185,11 +200,16 @@ export function DialogTeleport(props: { target?: string }) {
       return {
         title: session?.title ?? status.sessionID,
         value: status,
-        description: status.state + synced,
+        description: pickerDescription(status.state, mode()) + synced,
         details: [targetLabel(status.target)],
       }
     }),
   )
+
+  const run = (op: "jump" | "return", status: TeleportStatus) =>
+    op === "return" ? void returnHere(status) : jump(status)
+  const opTitle = (op: "jump" | "return") => (op === "return" ? "return here" : "jump")
+  const picker = createMemo(() => pickerActions(mode()))
 
   return (
     <Switch>
@@ -206,15 +226,15 @@ export function DialogTeleport(props: { target?: string }) {
           title="Teleported sessions"
           options={options()}
           current={teleports().find((status) => status.sessionID === sessionID())}
-          onSelect={(option) => jump(option.value)}
+          onSelect={(option) => run(picker().primary, option.value)}
           actions={[
             {
-              command: "dialog.teleport.return",
-              title: "return here",
-              onTrigger: (option) => void returnHere(option.value),
+              command: picker().secondary === "return" ? "dialog.teleport.return" : "dialog.teleport.jump",
+              title: opTitle(picker().secondary),
+              onTrigger: (option) => run(picker().secondary, option.value),
             },
           ]}
-          footerHints={[{ title: "jump", label: jumpShortcut() }]}
+          footerHints={[{ title: opTitle(picker().primary), label: submitShortcut() }]}
         />
       </Match>
       <Match when={stage() === "target"}>

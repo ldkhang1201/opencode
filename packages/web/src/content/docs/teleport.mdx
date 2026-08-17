@@ -20,9 +20,9 @@ SSH is used only as the bootstrap and transport channel: one authentication (pas
 3. **Session transfer** — the session (full transcript) is exported, imported on the target, and re-bound to the remote directory. On its next prompt the agent sees the remote machine's environment.
 4. **Remote server** — a detached `opencode serve` starts on the target's loopback with a generated password, surviving SSH disconnects. A supervised tunnel with automatic respawn connects you to it.
 5. **Freeze** — the local copy of the session is frozen: prompting it fails with a clear error until the session returns. This prevents two agents running the same session on two machines.
-6. **Return** — `/teleport-return` (or `/return`) exports the session on the remote (remote is authoritative), merges it back locally, removes the copied credentials, the SSH key, and the remote server, and unfreezes the local session. While teleported, a background sync pulls the remote transcript every minute so the local copy trails the remote even if the host later becomes unreachable.
+6. **Return** — `/teleport-return` (or `/return`) exports the session on the remote (remote is authoritative), merges it back locally, removes the copied credentials, the SSH key, and the remote server, and unfreezes the local session. While teleported, a background sync pulls the remote transcript every minute — a read-only mirror, not a return — so the local copy trails the remote even if the host later becomes unreachable.
 
-If the link is down when you return, the return is persisted and retried with backoff — including after restarting opencode.
+Returns are only ever user-initiated — opencode never retries one on its own. If the link drops mid-return, the session stays "return pending": pick it from `/list` (or run `opencode teleport return`) to resume the return, including after restarting opencode.
 
 ---
 
@@ -30,6 +30,7 @@ If the link is down when you return, the return is persisted and retried with ba
 
 - `/teleport user@host[:/path]` — teleport the current session. Prompts for the SSH password only if key/agent auth fails. Defaults to the remote home directory when `:/path` is omitted.
 - `/teleport` (no argument) — opens a picker of all teleported sessions: **jump** to one (attach to its remote server) or **return it here** (pull it back and continue locally).
+- `/list` (alias `/teleported`) — the same picker, return-first: choose a remote session to **call back here** (selecting an entry returns it), with jump as the secondary action. Sessions with an interrupted return show "return pending — select to retry", and selecting them retries the return.
 - `/teleport-return` (alias `/return`) — bring the current teleported session home.
 
 Frozen sessions show a `⇄ teleported to <host>` badge. Network drops show "connection lost / reconnected" toasts, and the view re-syncs automatically after a gap.

@@ -233,6 +233,38 @@ describe("teleport service state machine", () => {
     }),
   )
 
+  itInstance("recover() never initiates a return: a 'returning' state file waits for the user", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      const data = fixture()
+      yield* importSession(data, ctx)
+      const sessionID = SessionID.make(data.info.id)
+
+      // an interrupted return persisted "returning"
+      yield* Effect.promise(() => TeleportState.write(stateFixture(sessionID, "returning")))
+
+      // a working fake remote: if recover() retried the return it would
+      // succeed here (export answered) and remove the state file
+      const env = yield* Effect.promise(() => installFakeSsh({ exportData: fixture(), sleepMs: 0 }))
+      yield* Effect.addFinalizer(() => Effect.sync(env.restore))
+
+      const teleport = yield* Teleport.Service
+      yield* teleport.recover()
+      // grace period: an auto-return would have been forked into the scope
+      yield* Effect.sleep(Duration.millis(750))
+
+      // no remote export ran and the pending return is still on disk,
+      // waiting for an explicit /list selection or `opencode teleport return`
+      expect(yield* Effect.promise(() => readSpans(env.logFile))).toHaveLength(0)
+      const after = yield* Effect.promise(() => TeleportState.read(sessionID))
+      expect(after?.state).toBe("returning")
+
+      // explicit resumption still works: ret() accepts the "returning" phase
+      yield* awaitWithTimeout(teleport.ret(sessionID), "explicit return did not finish", Duration.seconds(30))
+      expect(yield* Effect.promise(() => TeleportState.read(sessionID))).toBeUndefined()
+    }),
+  )
+
   itInstance("concurrent pull and return serialize through the per-session mutex", () =>
     Effect.gen(function* () {
       const ctx = yield* requireInstance
