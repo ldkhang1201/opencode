@@ -1,0 +1,71 @@
+---
+title: Teleport
+description: Move a live session onto a remote machine over SSH and keep working there.
+---
+
+Teleport moves your current session onto a remote machine. After teleporting, the agent runs natively on the target — every tool call (shell, file reads, searches) executes locally there with no per-call SSH round trips, and the agent's context (working directory, platform, environment) reflects the target machine. Your local TUI becomes a thin client attached over an SSH tunnel, so a dropped network connection never kills the remote run: the remote server keeps working, and the TUI reconnects and catches up.
+
+```
+/teleport user@host:/path/to/dir
+```
+
+SSH is used only as the bootstrap and transport channel: one authentication (password at most once — a per-session key is installed for silent reconnects), a one-time binary push, and a supervised `ssh -N -L` tunnel to the remote server, which binds to loopback only and requires a random per-teleport password.
+
+---
+
+## How it works
+
+1. **Bootstrap** — opencode opens an SSH ControlMaster to the target (respecting your `~/.ssh/config`), probes the platform, and pushes the matching opencode release binary if it's missing. Targets without internet access work: binaries come from a local cache (see [prefetch](#prefetch)).
+2. **Credentials** — your local `auth.json` and config are copied to the target (0600) so the remote agent can reach your model provider. They can be scrubbed on return.
+3. **Session transfer** — the session (full transcript) is exported, imported on the target, and re-bound to the remote directory. On its next prompt the agent sees the remote machine's environment.
+4. **Remote server** — a detached `opencode serve` starts on the target's loopback with a generated password, surviving SSH disconnects. A supervised tunnel with automatic respawn connects you to it.
+5. **Freeze** — the local copy of the session is frozen: prompting it fails with a clear error until the session returns. This prevents two agents running the same session on two machines.
+6. **Return** — `/teleport-return` (or `/return`) exports the session on the remote (remote is authoritative), merges it back locally, removes the copied credentials, the SSH key, and the remote server, and unfreezes the local session. While teleported, a background sync pulls the remote transcript every minute so the local copy trails the remote even if the host later becomes unreachable.
+
+If the link is down when you return, the return is persisted and retried with backoff — including after restarting opencode.
+
+---
+
+## TUI
+
+- `/teleport user@host[:/path]` — teleport the current session. Prompts for the SSH password only if key/agent auth fails. Defaults to the remote home directory when `:/path` is omitted.
+- `/teleport` (no argument) — opens a picker of all teleported sessions: **jump** to one (attach to its remote server) or **return it here** (pull it back and continue locally).
+- `/teleport-return` (alias `/return`) — bring the current teleported session home.
+
+Frozen sessions show a `⇄ teleported to <host>` badge. Network drops show "connection lost / reconnected" toasts, and the view re-syncs automatically after a gap.
+
+---
+
+## CLI
+
+Everything works headlessly too:
+
+```bash
+opencode teleport user@host:/srv/app --session ses_xxx   # bootstrap + stay as tunnel supervisor
+opencode attach http://127.0.0.1:<port> -p <password> --session ses_xxx --dir /srv/app
+opencode teleport list                                   # all teleported sessions
+opencode teleport pull --session ses_xxx                 # one-shot sync of the remote transcript
+opencode teleport return --session ses_xxx               # bring it home (--no-scrub to keep remote credentials)
+opencode teleport abort --session ses_xxx --force        # escape hatch: unfreeze locally with the last synced transcript
+```
+
+`opencode teleport <target>` prints connection info as JSON on stdout and stays in the foreground supervising the tunnel and the periodic pull; Ctrl-C stops supervision (the remote run continues; re-run the command to reconnect without a password).
+
+### Prefetch
+
+Targets with no internet access need the binary pushed from your machine. Fill the local cache while online:
+
+```bash
+opencode teleport prefetch                # cache the binary for your own platform
+opencode teleport prefetch linux-x64-musl # or for specific targets
+```
+
+---
+
+## Limitations
+
+- Snapshot/undo history and todos don't transfer with the session.
+- Config that references local paths (MCP servers, plugins, skill directories) may not work on the target.
+- Windows targets are not supported (the local side works via `ssh.exe`).
+- The in-TUI hot handoff requires the TUI to be running against a local opencode server (the tunnel lands on the server's machine). If you're attached to a remote server, the teleport still succeeds — attach to it from the server machine, or use the CLI there.
+- Copied credentials are readable by root on the target while teleported; return scrubs them by default. OAuth providers that rotate refresh tokens on the remote can invalidate the local copy.
