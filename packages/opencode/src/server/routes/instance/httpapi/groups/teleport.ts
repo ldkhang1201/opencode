@@ -10,6 +10,7 @@ import {
   ConflictError,
   InvalidRequestError,
   ServiceUnavailableError,
+  SessionBusyError,
   TeleportFailedError,
   TeleportPasswordRequiredError,
 } from "../errors"
@@ -70,6 +71,7 @@ export const TeleportApi = HttpApi.make("teleport")
             ApiNotFoundError,
             ConflictError,
             InvalidRequestError,
+            SessionBusyError,
             TeleportFailedError,
             TeleportPasswordRequiredError,
           ],

@@ -9,6 +9,7 @@ import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session
 import type { InstanceContext } from "@/project/instance-context"
 import type { SessionID } from "@/session/schema"
 import path from "path"
+import { and, eq, notInArray } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 
 export type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
@@ -69,9 +70,12 @@ export const importSession = Effect.fn("SessionTransfer.import")(function* (
     .run()
     .pipe(Effect.orDie)
 
+  const keptMessages: SessionV1.Info["id"][] = []
+  const keptParts: SessionV1.Part["id"][] = []
   for (const msg of data.messages) {
     const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
     const { id, sessionID: _, ...msgData } = msgInfo
+    keptMessages.push(id)
     const messageValues = {
       id,
       session_id: row.id,
@@ -93,6 +97,7 @@ export const importSession = Effect.fn("SessionTransfer.import")(function* (
     for (const part of msg.parts) {
       const partInfo = decodePart(part) as SessionV1.Part
       const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+      keptParts.push(partId)
       const partValues = {
         id: partId,
         message_id: messageID,
@@ -108,6 +113,31 @@ export const importSession = Effect.fn("SessionTransfer.import")(function* (
         .run()
         .pipe(Effect.orDie)
     }
+  }
+
+  if (overwrite) {
+    // Remote authoritative: local message/part rows the export no longer
+    // carries (remote revert/cleanup) must be deleted, or every pull/return
+    // would resurrect them. Parts of kept messages are covered too: any part
+    // id absent from the export goes away.
+    yield* db
+      .delete(PartTable)
+      .where(
+        keptParts.length
+          ? and(eq(PartTable.session_id, row.id), notInArray(PartTable.id, keptParts))
+          : eq(PartTable.session_id, row.id),
+      )
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .delete(MessageTable)
+      .where(
+        keptMessages.length
+          ? and(eq(MessageTable.session_id, row.id), notInArray(MessageTable.id, keptMessages))
+          : eq(MessageTable.session_id, row.id),
+      )
+      .run()
+      .pipe(Effect.orDie)
   }
 
   return info.id

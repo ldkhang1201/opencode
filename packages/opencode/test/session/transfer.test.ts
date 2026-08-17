@@ -118,6 +118,60 @@ describe("session transfer lib", () => {
     }),
   )
 
+  it.instance("re-import with overwrite deletes messages and parts absent from the export (remote authoritative)", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      yield* importSession(fixture(), ctx)
+
+      // remote reverted the assistant reply: the export carries only message 0
+      const trimmed = fixture()
+      trimmed.messages = [trimmed.messages[0]]
+      yield* importSession(trimmed, ctx, { overwrite: true })
+
+      const svc = yield* SessionNs.Service
+      const id = SessionID.make(trimmed.info.id)
+      const messages = yield* svc.messages({ sessionID: id })
+      expect(messages).toHaveLength(1)
+      const text = JSON.stringify(messages)
+      expect(text).toContain("FIXTURE_USER_QUESTION")
+      expect(text).not.toContain("FIXTURE_ASSISTANT_REPLY")
+    }),
+  )
+
+  it.instance("re-import with overwrite deletes parts dropped from kept messages", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      yield* importSession(fixture(), ctx)
+
+      const trimmed = fixture()
+      const dropped = trimmed.messages[1].parts.pop()!
+      yield* importSession(trimmed, ctx, { overwrite: true })
+
+      const svc = yield* SessionNs.Service
+      const messages = yield* svc.messages({ sessionID: SessionID.make(trimmed.info.id) })
+      expect(messages).toHaveLength(2)
+      const assistant = messages.find((msg) => msg.info.id === trimmed.messages[1].info.id)!
+      expect(assistant.parts.map((part) => part.id)).not.toContain(dropped.id)
+      expect(assistant.parts).toHaveLength(trimmed.messages[1].parts.length)
+    }),
+  )
+
+  it.instance("re-import without overwrite never deletes local rows", () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      yield* importSession(fixture(), ctx)
+
+      const trimmed = fixture()
+      trimmed.messages = [trimmed.messages[0]]
+      yield* importSession(trimmed, ctx)
+
+      const svc = yield* SessionNs.Service
+      const messages = yield* svc.messages({ sessionID: SessionID.make(trimmed.info.id) })
+      expect(messages).toHaveLength(2)
+      expect(JSON.stringify(messages)).toContain("FIXTURE_ASSISTANT_REPLY")
+    }),
+  )
+
   it.instance("import metadata option replaces the exported metadata in the same row write", () =>
     Effect.gen(function* () {
       const ctx = yield* requireInstance

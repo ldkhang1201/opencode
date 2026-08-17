@@ -142,15 +142,14 @@ const AUTH_FAILURE =
   /permission denied|authentication failed|too many authentication failures|host key verification failed/i
 
 /**
- * Establish a ControlMaster connection. Without a password this uses
- * BatchMode (fails fast if key auth is unavailable — catch `SshOpenError`
- * with `authFailure: true` and retry with a password). With a password the
- * secret is delivered through a one-shot SSH_ASKPASS helper; ssh is spawned
- * detached (setsid, no TTY) so askpass engages on both macOS and Linux.
+ * argv for the ControlMaster bootstrap ssh. The password-auth attempt only
+ * ever runs after a BatchMode/pubkey attempt failed, and it uses
+ * SSH_ASKPASS_REQUIRE=force which routes EVERY prompt through the one-shot
+ * askpass helper — so pubkey auth must be hard-disabled here, or a
+ * passphrase-protected default identity would consume the single-read
+ * password file before password auth ever ran.
  */
-export async function open(target: Target, opts: OpenOptions): Promise<MasterHandle> {
-  const dest = destination(target)
-  const extraArgs = [...(opts.extraArgs ?? [])]
+export function openArgs(dest: string, opts: { controlPath: string; password?: string; extraArgs?: string[] }) {
   const args = [
     "-f",
     "-N",
@@ -166,8 +165,36 @@ export async function open(target: Target, opts: OpenOptions): Promise<MasterHan
     "ConnectTimeout=10",
   ]
   if (opts.password === undefined) args.push("-o", "BatchMode=yes")
-  else args.push("-o", "BatchMode=no", "-o", "NumberOfPasswordPrompts=1")
-  args.push(...extraArgs, "--", dest)
+  else
+    args.push(
+      "-o",
+      "BatchMode=no",
+      "-o",
+      "NumberOfPasswordPrompts=1",
+      "-o",
+      "PubkeyAuthentication=no",
+      "-o",
+      "PreferredAuthentications=password,keyboard-interactive",
+    )
+  args.push(...(opts.extraArgs ?? []), "--", dest)
+  return args
+}
+
+/**
+ * Establish a ControlMaster connection. Without a password this uses
+ * BatchMode (fails fast if key auth is unavailable — catch `SshOpenError`
+ * with `authFailure: true` and retry with a password). With a password the
+ * secret is delivered through a one-shot SSH_ASKPASS helper; ssh is spawned
+ * detached (setsid, no TTY) so askpass engages on both macOS and Linux.
+ */
+export async function open(target: Target, opts: OpenOptions): Promise<MasterHandle> {
+  const dest = destination(target)
+  const extraArgs = [...(opts.extraArgs ?? [])]
+  const args = openArgs(dest, {
+    controlPath: opts.controlPath,
+    ...(opts.password !== undefined ? { password: opts.password } : {}),
+    extraArgs,
+  })
 
   let askpassDir: string | undefined
   let env: NodeJS.ProcessEnv | undefined

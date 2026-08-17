@@ -15,6 +15,7 @@ import {
   installKeyScript,
   keyMarker,
   open,
+  openArgs,
   parseTarget,
   push,
   pushCommand,
@@ -95,6 +96,33 @@ describe("teleport/ssh backoffDelay", () => {
   test("clamps nonsense attempts to the first delay", () => {
     expect(backoffDelay(0)).toBe(1_000)
     expect(backoffDelay(-3)).toBe(1_000)
+  })
+})
+
+describe("teleport/ssh openArgs", () => {
+  test("batch mode fails fast without touching auth method selection", () => {
+    const args = openArgs("alice@example.com", { controlPath: "/tmp/cp.sock" })
+    expect(args).toContain("BatchMode=yes")
+    expect(args).not.toContain("PubkeyAuthentication=no")
+    expect(args[args.length - 2]).toBe("--")
+    expect(args[args.length - 1]).toBe("alice@example.com")
+  })
+
+  test("password mode disables pubkey auth so a key-passphrase prompt can never consume the one-shot askpass", () => {
+    const args = openArgs("alice@example.com", {
+      controlPath: "/tmp/cp.sock",
+      password: "pw",
+      extraArgs: ["-p", "2222"],
+    })
+    expect(args).toContain("BatchMode=no")
+    expect(args).toContain("PubkeyAuthentication=no")
+    expect(args).toContain("PreferredAuthentications=password,keyboard-interactive")
+    expect(args).toContain("NumberOfPasswordPrompts=1")
+    // extra args stay after the built-ins, before the destination
+    expect(args.indexOf("-p")).toBeGreaterThan(args.indexOf("PreferredAuthentications=password,keyboard-interactive"))
+    expect(args[args.length - 1]).toBe("alice@example.com")
+    // the password itself never enters argv
+    expect(args).not.toContain("pw")
   })
 })
 

@@ -61,9 +61,10 @@ export class TeleportHandoff {
  * original (local) server and re-runs the TUI against the original transport.
  */
 export class TeleportReturn {
+  /** `scrub` undefined means "not specified": the relaunch loop omits it so the server default (scrub) applies. */
   constructor(
     readonly sessionID: string,
-    readonly scrub: boolean = false,
+    readonly scrub?: boolean,
   ) {}
 }
 
@@ -94,6 +95,27 @@ export function errorMessageOf(body: unknown): string | undefined {
   if (!isRecord(body)) return undefined
   if (typeof body["message"] === "string" && body["message"]) return body["message"]
   return errorMessageOf(body["data"]) ?? errorMessageOf(body["error"])
+}
+
+/** Only teleported/returning sessions can be returned; failed/bootstrapping ones need `opencode teleport abort`. */
+export function returnableState(state: TeleportStatus["state"]): boolean {
+  return state === "teleported" || state === "returning"
+}
+
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "opencode.internal"])
+
+/**
+ * True when the TUI's sdk base url terminates on this machine: loopback or the
+ * in-process worker transport (http://opencode.internal). Only then does a
+ * TeleportHandoff make sense — its url is a 127.0.0.1:<tunnelPort> listener on
+ * the SERVER machine, unreachable from a remotely attached TUI.
+ */
+export function isLocalTransportUrl(url: string): boolean {
+  try {
+    return LOCAL_HOSTS.has(new URL(url).hostname.toLowerCase())
+  } catch {
+    return false
+  }
 }
 
 export function jumpUrl(status: TeleportStatus): string | undefined {
@@ -217,7 +239,8 @@ export function createTeleportClient(input: TeleportClientInput) {
     async return(sessionID: string, options?: { scrub?: boolean }): Promise<void> {
       const response = await request(`/session/${sessionID}/teleport/return`, {
         method: "POST",
-        body: { scrub: options?.scrub ?? false },
+        // omit an unspecified scrub so the server default (scrub) applies
+        body: options?.scrub === undefined ? {} : { scrub: options.scrub },
       })
       if (!response.ok) return fail(response)
     },

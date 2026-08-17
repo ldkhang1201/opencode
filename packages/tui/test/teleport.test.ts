@@ -4,8 +4,10 @@ import {
   createTeleportClient,
   handoffFromInfo,
   handoffFromStatus,
+  isLocalTransportUrl,
   isPasswordRequiredBody,
   jumpUrl,
+  returnableState,
   targetLabel,
   teleportMetadata,
   TeleportHandoff,
@@ -43,9 +45,36 @@ describe("TeleportHandoff", () => {
 })
 
 describe("TeleportReturn", () => {
-  test("defaults scrub to false", () => {
-    expect(new TeleportReturn("ses").scrub).toBe(false)
+  test("leaves scrub undefined by default so the server default (scrub) applies", () => {
+    expect(new TeleportReturn("ses").scrub).toBeUndefined()
     expect(new TeleportReturn("ses", true).scrub).toBe(true)
+    expect(new TeleportReturn("ses", false).scrub).toBe(false)
+  })
+})
+
+describe("returnableState", () => {
+  test("only teleported/returning sessions can be returned", () => {
+    expect(returnableState("teleported")).toBe(true)
+    expect(returnableState("returning")).toBe(true)
+    expect(returnableState("failed")).toBe(false)
+    expect(returnableState("bootstrapping")).toBe(false)
+  })
+})
+
+describe("isLocalTransportUrl", () => {
+  test("accepts loopback and the in-process worker url", () => {
+    expect(isLocalTransportUrl("http://127.0.0.1:4096")).toBe(true)
+    expect(isLocalTransportUrl("http://localhost:4096")).toBe(true)
+    expect(isLocalTransportUrl("http://LOCALHOST:4096")).toBe(true)
+    expect(isLocalTransportUrl("http://[::1]:4096")).toBe(true)
+    expect(isLocalTransportUrl("http://opencode.internal")).toBe(true)
+  })
+
+  test("rejects remote hosts and malformed urls", () => {
+    expect(isLocalTransportUrl("http://gpu-box:4096")).toBe(false)
+    expect(isLocalTransportUrl("http://192.168.1.10:4096")).toBe(false)
+    expect(isLocalTransportUrl("https://example.com")).toBe(false)
+    expect(isLocalTransportUrl("not a url")).toBe(false)
   })
 })
 
@@ -194,14 +223,18 @@ describe("createTeleportClient", () => {
     expect(calls[0].url).toBe("http://localhost:4096/teleport")
   })
 
-  test("return POSTs scrub flag", async () => {
+  test("return POSTs scrub only when explicitly set (absent means server default: scrub)", async () => {
     const { fetch, calls } = stub(() => json({}))
     const client = createTeleportClient({ url: "http://localhost:4096", fetch })
     await client.return("ses", { scrub: true })
     expect(calls[0].url).toBe("http://localhost:4096/session/ses/teleport/return")
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({ scrub: true })
     await client.return("ses")
-    expect(JSON.parse(calls[1].init?.body as string)).toEqual({ scrub: false })
+    expect(JSON.parse(calls[1].init?.body as string)).toEqual({})
+    await client.return("ses", { scrub: undefined })
+    expect(JSON.parse(calls[2].init?.body as string)).toEqual({})
+    await client.return("ses", { scrub: false })
+    expect(JSON.parse(calls[3].init?.body as string)).toEqual({ scrub: false })
   })
 
   test("pull POSTs /teleport/pull", async () => {

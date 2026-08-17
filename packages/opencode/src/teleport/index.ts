@@ -9,7 +9,7 @@ import crypto from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Context, Duration, Effect, Fiber, Layer, Schedule, Schema, Scope } from "effect"
+import { Context, Duration, Effect, Fiber, Layer, Schedule, Schema, Scope, Semaphore } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Database } from "@opencode-ai/core/database/database"
 import { Global } from "@opencode-ai/core/global"
@@ -18,6 +18,7 @@ import { Installation } from "@/installation"
 import { InstanceStore } from "@/project/instance-store"
 import { ServerAuth } from "@/server/auth"
 import { SessionID } from "@/session/schema"
+import { SessionRunState } from "@/session/run-state"
 import { Session } from "@/session/session"
 import { SessionTransfer } from "@/session/transfer"
 import { BinaryCache } from "./binary-cache"
@@ -78,6 +79,7 @@ export type StartError =
   | AlreadyTeleportedError
   | UnsupportedTargetError
   | TeleportError
+  | Session.BusyError
   | BinaryCache.BinaryNotCachedError
   | BinaryCache.DownloadFailedError
 export type OpError = NotTeleportedError | TeleportError
@@ -158,6 +160,77 @@ export function importScript(input: { binPath: string; dir: string; file: string
 export function exportScript(input: { binPath: string; dir: string; sessionID: string }) {
   const q = TeleportSsh.shellQuote
   return ["set -eu", `cd ${q(input.dir)}`, `${q(input.binPath)} export ${q(input.sessionID)}`].join("\n")
+}
+
+/**
+ * Retarget a resumed (failed/interrupted) state at the freshly parsed target:
+ * tunnel, pull, return and abort all dial `st.target.{user,host}`, so retrying
+ * at a different host must not leave them pointing at the old one. The path is
+ * left alone — it is re-resolved against the remote home in the probe step.
+ */
+export function resumeState(existing: TeleportState.State, parsed: TeleportSsh.Target): TeleportState.State {
+  existing.target.host = parsed.host
+  if (parsed.user === undefined) delete existing.target.user // the schema rejects an explicit undefined
+  else existing.target.user = parsed.user
+  return existing
+}
+
+export interface PullLoopInput {
+  sessionID: string
+  pull: Effect.Effect<void, OpError>
+  /** runs exactly once when the loop stops because the state file is gone */
+  release: Effect.Effect<void>
+  /** test hook; production ticks every minute */
+  interval?: Duration.Duration
+}
+
+/**
+ * Supervised pull-loop body. Sleeps first: right after start() the transcript
+ * was just imported, and recover() in short-lived processes must not fire an
+ * immediate pull that races the owning supervisor's imports. Transient
+ * failures (and defects) are logged and retried forever; NotTeleportedError —
+ * the state file is gone, an out-of-band return/abort — runs `release` once
+ * and stops the loop instead of leaking the tunnel plus a warning per tick.
+ */
+export function pullLoopEffect(input: PullLoopInput): Effect.Effect<void> {
+  const tick = input.pull.pipe(
+    Effect.as("continue" as const),
+    Effect.catchTag("TeleportNotTeleportedError", () => Effect.succeed("stop" as const)),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("teleport pull failed", { sessionID: input.sessionID, cause }).pipe(
+        Effect.as("continue" as const),
+      ),
+    ),
+  )
+  return Effect.gen(function* () {
+    while (true) {
+      yield* Effect.sleep(input.interval ?? Duration.minutes(1))
+      if ((yield* tick) === "stop") break
+    }
+    yield* input.release
+  })
+}
+
+/**
+ * Per-session in-process mutex over start/pull/return/abort: all four mutate
+ * the same state file and session row, and pull's check-then-import must
+ * never interleave with return's authoritative import (the pull would
+ * re-freeze the just-returned row). Cross-process races (e.g. a CLI
+ * `teleport pull` racing a server-side return) remain possible — the state
+ * file carries no on-disk lock — and are accepted for v1.
+ */
+export function makeSessionLocks(): (
+  sessionID: string,
+) => <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R> {
+  const locks = new Map<string, Semaphore.Semaphore>()
+  return (sessionID) => {
+    let lock = locks.get(sessionID)
+    if (!lock) {
+      lock = Semaphore.makeUnsafe(1)
+      locks.set(sessionID, lock)
+    }
+    return lock.withPermits(1)
+  }
 }
 
 /** Remove the teleport freeze marker; undefined when nothing else remains. */
@@ -251,11 +324,12 @@ function masterOf(st: TeleportState.State, sshArgs?: string[]): TeleportSsh.Mast
 const layer: Layer.Layer<
   Service,
   never,
-  Session.Service | Database.Service | BinaryCache.Service | InstanceStore.Service
+  Session.Service | SessionRunState.Service | Database.Service | BinaryCache.Service | InstanceStore.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sessions = yield* Session.Service
+    const runState = yield* SessionRunState.Service
     const database = yield* Database.Service
     const binaries = yield* BinaryCache.Service
     const store = yield* InstanceStore.Service
@@ -263,6 +337,10 @@ const layer: Layer.Layer<
 
     // The process that ran start()/recover() owns the tunnel + pull fiber.
     const registry = new Map<string, RegistryEntry>()
+
+    // Intra-process serialization of start/pull/ret/abort per session (see
+    // makeSessionLocks for the cross-process caveat).
+    const locks = makeSessionLocks()
 
     const stopRegistry = Effect.fnUntraced(function* (sessionID: string) {
       const entry = registry.get(sessionID)
@@ -334,7 +412,7 @@ const layer: Layer.Layer<
           new TeleportError({ step, message: `health check through tunnel failed: ${String(cause)}` }),
       }).pipe(Effect.retry(Schedule.spaced(Duration.millis(500)).pipe(Schedule.both(Schedule.recurs(60)))))
 
-    const pull: Interface["pull"] = Effect.fn("Teleport.pull")(function* (sessionID) {
+    const pullUnlocked = Effect.fnUntraced(function* (sessionID: SessionID) {
       const st = yield* Effect.promise(() => TeleportState.read(sessionID))
       if (!st) return yield* new NotTeleportedError({ sessionID })
       if (st.state !== "teleported") return
@@ -353,19 +431,24 @@ const layer: Layer.Layer<
       yield* persist(fresh)
     })
 
-    // sleep first: right after start() the transcript was just imported, and
-    // recover() in short-lived processes must not fire an immediate pull that
-    // races the owning supervisor's imports
+    const pull: Interface["pull"] = Effect.fn("Teleport.pull")(function* (sessionID) {
+      return yield* locks(sessionID)(pullUnlocked(sessionID))
+    })
+
     const pullLoop = (sessionID: SessionID) =>
-      Effect.sleep(Duration.minutes(1)).pipe(
-        Effect.andThen(
-          pull(sessionID).pipe(
-            Effect.catchCause((cause) => Effect.logWarning("teleport pull failed", { sessionID, cause })),
-          ),
-        ),
-        Effect.forever,
-        Effect.forkIn(scope),
-      )
+      pullLoopEffect({
+        sessionID,
+        pull: pull(sessionID),
+        // out-of-band return/abort removed the state file: drop this session's
+        // registry entry inline — stopRegistry would interrupt the very fiber
+        // running this loop before it could stop the tunnel
+        release: Effect.gen(function* () {
+          const entry = registry.get(sessionID)
+          if (!entry) return
+          registry.delete(sessionID)
+          if (entry.tunnel) yield* Effect.promise(() => entry.tunnel!.stop())
+        }),
+      }).pipe(Effect.forkIn(scope))
 
     /** Establish the tunnel + health check + pull fiber for a bootstrapped state. */
     const connect = Effect.fnUntraced(function* (st: TeleportState.State, step: string) {
@@ -405,7 +488,7 @@ const layer: Layer.Layer<
       } satisfies Info
     })
 
-    const start: Interface["start"] = Effect.fn("Teleport.start")(function* (input) {
+    const startUnlocked = Effect.fnUntraced(function* (input: StartInput) {
       const onPhase = input.onPhase ?? (() => {})
       const parsed = TeleportSsh.parseTarget(input.target)
       if (TeleportSsh.TargetParseError.isInstance(parsed))
@@ -427,9 +510,14 @@ const layer: Layer.Layer<
           message: "session is being returned — finish `opencode teleport return` first",
         })
 
+      // A running local agent loop would immediately diverge from the frozen
+      // copy — refuse busy sessions with the same signal prompt/revert
+      // admission uses, before any remote side effect.
+      yield* runState.assertNotBusy(input.sessionID)
+
       const now = Date.now()
       const tag = sanitizeTag(input.sessionID)
-      const st: TeleportState.State = existing ?? {
+      const st: TeleportState.State = existing ? resumeState(existing, parsed) : {
         version: 1,
         sessionID: input.sessionID,
         target: { ...(parsed.user !== undefined ? { user: parsed.user } : {}), host: parsed.host, path: parsed.path ?? "" },
@@ -707,9 +795,25 @@ const layer: Layer.Layer<
       )
     })
 
-    const ret: Interface["ret"] = Effect.fn("Teleport.return")(function* (sessionID, opts) {
+    const start: Interface["start"] = Effect.fn("Teleport.start")(function* (input) {
+      return yield* locks(input.sessionID)(startUnlocked(input))
+    })
+
+    const retUnlocked = Effect.fnUntraced(function* (
+      sessionID: SessionID,
+      opts?: { scrub?: boolean; sshArgs?: string[] },
+    ) {
       const st = yield* Effect.promise(() => TeleportState.read(sessionID))
       if (!st) return yield* new NotTeleportedError({ sessionID })
+      // Only a live (or already returning) teleport can be returned: a
+      // failed/bootstrapping one has no remote server to export from, and
+      // persisting "returning" would wedge recover() into retrying an
+      // impossible export forever while start() refuses to resume.
+      if (st.state !== "teleported" && st.state !== "returning")
+        return yield* new TeleportError({
+          step: "return",
+          message: `session ${sessionID} is ${st.state} — run \`opencode teleport abort\` to clean it up`,
+        })
       st.state = "returning"
       yield* persist(st)
 
@@ -775,7 +879,14 @@ const layer: Layer.Layer<
       yield* Effect.promise(() => TeleportState.remove(sessionID))
     })
 
-    const abort: Interface["abort"] = Effect.fn("Teleport.abort")(function* (sessionID, opts) {
+    const ret: Interface["ret"] = Effect.fn("Teleport.return")(function* (sessionID, opts) {
+      return yield* locks(sessionID)(retUnlocked(sessionID, opts))
+    })
+
+    const abortUnlocked = Effect.fnUntraced(function* (
+      sessionID: SessionID,
+      opts?: { force?: boolean; sshArgs?: string[] },
+    ) {
       const st = yield* Effect.promise(() => TeleportState.read(sessionID))
       if (!st) return yield* new NotTeleportedError({ sessionID })
       yield* stopRegistry(sessionID)
@@ -818,6 +929,10 @@ const layer: Layer.Layer<
         )
       }
       yield* Effect.promise(() => TeleportState.remove(sessionID))
+    })
+
+    const abort: Interface["abort"] = Effect.fn("Teleport.abort")(function* (sessionID, opts) {
+      return yield* locks(sessionID)(abortUnlocked(sessionID, opts))
     })
 
     const list: Interface["list"] = Effect.fn("Teleport.list")(function* () {
@@ -864,7 +979,7 @@ const layer: Layer.Layer<
 export const node = LayerNode.make({
   service: Service,
   layer,
-  deps: [Session.node, Database.node, BinaryCache.node, InstanceStore.node],
+  deps: [Session.node, SessionRunState.node, Database.node, BinaryCache.node, InstanceStore.node],
 })
 
 export * as Teleport from "."

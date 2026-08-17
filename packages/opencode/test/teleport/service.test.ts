@@ -1,15 +1,24 @@
 // Unit tests for the pure/local parts of the Teleport service. The full
-// bootstrap path is covered by the dockerized E2E in teleport-e2e.test.ts.
+// bootstrap path is covered by the dockerized E2E in teleport-e2e.test.ts,
+// state-machine behavior by test/teleport/service-ops.test.ts.
 import { describe, expect, test } from "bun:test"
+import { Duration, Effect } from "effect"
 import {
   importScript,
+  makeSessionLocks,
+  NotTeleportedError,
   parseServeLog,
+  pullLoopEffect,
   resolveRemoteDir,
+  resumeState,
   sanitizeTag,
   serveScript,
   exportScript,
   stripTeleport,
+  TeleportError,
+  type OpError,
 } from "@/teleport/index"
+import type { TeleportState } from "@/teleport/state"
 
 describe("teleport service helpers", () => {
   test("sanitizeTag maps session ids onto the ssh key tag alphabet", () => {
@@ -75,5 +84,94 @@ describe("teleport service helpers", () => {
     expect(stripTeleport({ teleport: { state: "teleported" } })).toBeUndefined()
     expect(stripTeleport({ teleport: { state: "teleported" }, other: 1 })).toEqual({ other: 1 })
     expect(stripTeleport({ other: 1 })).toEqual({ other: 1 })
+  })
+})
+
+function stateFixture(): TeleportState.State {
+  return {
+    version: 1,
+    sessionID: "ses_x",
+    target: { user: "alice", host: "host-a.example.com", path: "/home/alice/work" },
+    state: "failed",
+    createdAt: 1,
+    updatedAt: 1,
+    remote: {
+      home: "",
+      dataDir: "",
+      stateDir: "",
+      target: "",
+      binaryPushed: false,
+      serverLogPath: "",
+      stateDir_: "",
+    },
+    local: { keyTag: "ses-x", controlPath: "/tmp/oc-tp-x.sock" },
+    copiedFiles: [],
+  }
+}
+
+describe("resumeState", () => {
+  test("retargets a resumed state at the newly parsed user/host", () => {
+    const st = resumeState(stateFixture(), { user: "bob", host: "host-b.example.com" })
+    expect(st.target.host).toBe("host-b.example.com")
+    expect(st.target.user).toBe("bob")
+    // path is re-resolved against the remote home during the probe step
+    expect(st.target.path).toBe("/home/alice/work")
+  })
+
+  test("drops a stale user when the new target has none (the schema rejects explicit undefined)", () => {
+    const st = resumeState(stateFixture(), { host: "host-b.example.com" })
+    expect(st.target.host).toBe("host-b.example.com")
+    expect("user" in st.target).toBe(false)
+  })
+})
+
+describe("pullLoopEffect", () => {
+  test("retries transient failures/defects and stops with a single release on NotTeleportedError", async () => {
+    const outcomes: Effect.Effect<void, OpError>[] = [
+      Effect.fail(new TeleportError({ step: "pull", message: "flaky network" })),
+      Effect.die(new Error("defect")),
+      Effect.void,
+      Effect.fail(new NotTeleportedError({ sessionID: "ses_x" })),
+    ]
+    let pulls = 0
+    let released = 0
+    await Effect.runPromise(
+      pullLoopEffect({
+        sessionID: "ses_x",
+        pull: Effect.suspend(() => outcomes[pulls++] ?? Effect.die(new Error("pulled past the state-file removal"))),
+        release: Effect.sync(() => {
+          released += 1
+        }),
+        interval: Duration.millis(1),
+      }),
+    )
+    expect(pulls).toBe(4)
+    expect(released).toBe(1)
+  })
+})
+
+describe("makeSessionLocks", () => {
+  test("serializes same-session effects and leaves different sessions concurrent", async () => {
+    const locks = makeSessionLocks()
+    const running = new Map<string, number>()
+    let overlapSame = 0
+    let overlapOther = 0
+    const critical = (key: string) =>
+      Effect.gen(function* () {
+        running.set(key, (running.get(key) ?? 0) + 1)
+        overlapSame = Math.max(overlapSame, running.get(key)!)
+        overlapOther = Math.max(overlapOther, running.size)
+        yield* Effect.sleep(Duration.millis(25))
+        running.set(key, running.get(key)! - 1)
+        if (running.get(key) === 0) running.delete(key)
+      })
+    await Effect.runPromise(
+      Effect.all(
+        [locks("a")(critical("a")), locks("a")(critical("a")), locks("b")(critical("b"))],
+        { concurrency: "unbounded" },
+      ),
+    )
+    expect(overlapSame).toBe(1) // same session never overlaps
+    expect(overlapOther).toBe(2) // different sessions do
   })
 })

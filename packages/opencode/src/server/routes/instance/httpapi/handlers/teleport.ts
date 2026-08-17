@@ -14,6 +14,12 @@ function mapStart(error: Teleport.StartError) {
       return new ApiError.ConflictError({ message: error.message, resource: "teleport" })
     case "TeleportUnsupportedTargetError":
       return new ApiError.InvalidRequestError({ message: error.message })
+    case "SessionBusyError":
+      // same 409 shape the session endpoints use for busy sessions
+      return new ApiError.SessionBusyError({
+        sessionID: error.sessionID,
+        message: `Session is busy: ${error.sessionID}`,
+      })
     case "TeleportError":
       return new ApiError.TeleportFailedError({ step: error.step, message: error.message })
     default:

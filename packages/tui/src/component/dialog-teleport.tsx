@@ -18,6 +18,8 @@ import {
   createTeleportClient,
   handoffFromInfo,
   handoffFromStatus,
+  isLocalTransportUrl,
+  returnableState,
   targetLabel,
   TeleportPasswordRequired,
   type TeleportStatus,
@@ -96,6 +98,18 @@ export function DialogTeleport(props: { target?: string }) {
     }, 1000)
     try {
       const info = await client.start(id, { target: trimmed, password })
+      // The handoff url is a loopback listener on the SERVER machine; a TUI
+      // attached over the network cannot reach it — teleport itself succeeded,
+      // only the hot-handoff is unavailable.
+      if (!isLocalTransportUrl(sdk.url)) {
+        toast.show({
+          message: `Session teleported. Attach from the server machine: opencode attach ${info.url} --session ${info.sessionID}`,
+          variant: "info",
+          duration: 10000,
+        })
+        if (!disposed) dialog.clear()
+        return
+      }
       const handoff = handoffFromInfo(info)
       if (disposed) {
         toast.show({ message: "Teleport ready — /teleport to jump", variant: "info" })
@@ -127,10 +141,26 @@ export function DialogTeleport(props: { target?: string }) {
       })
       return
     }
+    // see start(): the tunnel listener only exists on the server machine
+    if (!isLocalTransportUrl(sdk.url)) {
+      toast.show({
+        message: `Session teleported. Attach from the server machine: opencode attach ${handoff.url} --session ${handoff.sessionID}`,
+        variant: "info",
+        duration: 10000,
+      })
+      return
+    }
     exit(handoff)
   }
 
   async function returnHere(status: TeleportStatus) {
+    if (!returnableState(status.state)) {
+      toast.show({
+        message: `Session is ${status.state} — cannot return here; use \`opencode teleport abort\``,
+        variant: "warning",
+      })
+      return
+    }
     setProgress(`Returning session from ${targetLabel(status.target)}...`)
     setStage("progress")
     try {
