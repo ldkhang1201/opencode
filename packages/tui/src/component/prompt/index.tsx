@@ -51,7 +51,16 @@ import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
-import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
+import {
+  findSlashCommand,
+  OPENCODE_BASE_MODE,
+  parseSlashInput,
+  useBindings,
+  useCommandShortcut,
+  useCommandSlashes,
+  useLeaderActive,
+  useOpencodeKeymap,
+} from "../../keymap"
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
@@ -164,6 +173,7 @@ export function Prompt(props: PromptProps) {
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = useOpencodeKeymap()
+  const slashes = useCommandSlashes()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
   const renderer = useRenderer()
@@ -964,6 +974,22 @@ export function Prompt(props: PromptProps) {
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       void exit()
       return true
+    }
+    // Native TUI slash commands (/teleport, /models, ...) take precedence over
+    // server template commands and never go to the model. Autocomplete row
+    // selection already dispatches these; this covers raw submits — a fully
+    // typed name, or a name with trailing arguments.
+    if (store.mode === "normal") {
+      const slash = parseSlashInput(store.prompt.input)
+      const native = slash && findSlashCommand(slashes(), slash.name)
+      if (native) {
+        input.extmarks.clear()
+        setStore("prompt", { input: "", parts: [] })
+        setStore("extmarkToPartIndex", new Map())
+        input.clear()
+        native.onSelect(slash.args || undefined)
+        return true
+      }
     }
     const selectedModel = local.model.current()
     if (!selectedModel) {

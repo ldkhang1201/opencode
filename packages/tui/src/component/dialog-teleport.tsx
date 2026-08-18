@@ -52,7 +52,7 @@ export function DialogTeleport(props: { target?: string; primary?: TeleportPicke
 
   const sessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
 
-  const [stage, setStage] = createSignal<Stage>(props.target ? "target" : "loading")
+  const [stage, setStage] = createSignal<Stage>(props.target ? "progress" : "loading")
   const [teleports, setTeleports] = createSignal<TeleportStatus[]>([])
   const [progress, setProgress] = createSignal("Working...")
   const [pendingTarget, setPendingTarget] = createSignal(props.target ?? "")
@@ -74,7 +74,12 @@ export function DialogTeleport(props: { target?: string; primary?: TeleportPicke
   }
 
   onMount(() => {
-    if (props.target) return
+    // /teleport <target> starts immediately; start() falls back to the
+    // editable target input (prefilled) on failure so the user can correct it.
+    if (props.target) {
+      void start(props.target)
+      return
+    }
     client
       .list()
       .then((list) => {

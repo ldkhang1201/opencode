@@ -2,10 +2,17 @@
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { createBindingLookup } from "@opentui/keymap/extras"
 import { testRender, useRenderer } from "@opentui/solid"
-import { expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { onCleanup } from "solid-js"
 import { TuiKeybind } from "../src/config/keybind"
-import { getOpencodeModeStack, OPENCODE_BASE_MODE, OpencodeKeymapProvider, registerOpencodeKeymap } from "../src/keymap"
+import {
+  findSlashCommand,
+  getOpencodeModeStack,
+  OPENCODE_BASE_MODE,
+  OpencodeKeymapProvider,
+  parseSlashInput,
+  registerOpencodeKeymap,
+} from "../src/keymap"
 
 function createResolvedKeymapConfig(input: TuiKeybind.KeybindOverrides = {}) {
   const keybinds = TuiKeybind.parse(input)
@@ -138,4 +145,56 @@ test("mode-less bindings stay active when opencode mode changes", async () => {
   } finally {
     app.renderer.destroy()
   }
+})
+
+describe("parseSlashInput", () => {
+  test("bare slash command", () => {
+    expect(parseSlashInput("/teleport")).toEqual({ name: "teleport", args: "" })
+  })
+
+  test("slash command with arguments", () => {
+    expect(parseSlashInput("/teleport user@host:/path")).toEqual({ name: "teleport", args: "user@host:/path" })
+  })
+
+  test("trims argument whitespace", () => {
+    expect(parseSlashInput("/teleport   user@host  ")).toEqual({ name: "teleport", args: "user@host" })
+  })
+
+  test("tolerates trailing blank lines", () => {
+    expect(parseSlashInput("/list\n\n")).toEqual({ name: "list", args: "" })
+  })
+
+  test("rejects multiline input with non-empty extra lines", () => {
+    expect(parseSlashInput("/teleport user@host\nplease do it")).toBeUndefined()
+  })
+
+  test("rejects non-slash text", () => {
+    expect(parseSlashInput("hello world")).toBeUndefined()
+    expect(parseSlashInput("")).toBeUndefined()
+  })
+
+  test("rejects a lone slash", () => {
+    expect(parseSlashInput("/")).toBeUndefined()
+    expect(parseSlashInput("/ args")).toBeUndefined()
+  })
+})
+
+describe("findSlashCommand", () => {
+  const entries = [
+    { display: "/teleport", onSelect: () => {} },
+    { display: "/list", aliases: ["/teleported"], onSelect: () => {} },
+  ]
+
+  test("matches by display name", () => {
+    expect(findSlashCommand(entries, "teleport")).toBe(entries[0])
+  })
+
+  test("matches by alias", () => {
+    expect(findSlashCommand(entries, "teleported")).toBe(entries[1])
+  })
+
+  test("returns undefined for unknown names", () => {
+    expect(findSlashCommand(entries, "nope")).toBeUndefined()
+    expect(findSlashCommand(entries, "tele")).toBeUndefined()
+  })
 })

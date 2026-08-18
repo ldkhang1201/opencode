@@ -1,6 +1,7 @@
 import { render, TimeToFirstDraw, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { registerOpencodeSpinner } from "./component/register-spinner"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+import type { CommandContext } from "@opentui/keymap"
 import { Deferred, Effect } from "effect"
 import { Global } from "@opencode-ai/core/global"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -606,7 +607,14 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         title: "Teleport session",
         category: "Session",
         slashName: "teleport",
-        run: () => {
+        run: (ctx: CommandContext) => {
+          // `/teleport user@host[:/path]` starts immediately; bare `/teleport`
+          // (or palette/keybind dispatch) opens the picker.
+          const target = typeof ctx.payload === "string" ? ctx.payload.trim() : ""
+          if (target) {
+            dialog.replace(() => <DialogTeleport target={target} />)
+            return
+          }
           dialog.replace(() => <DialogTeleport />)
         },
       },

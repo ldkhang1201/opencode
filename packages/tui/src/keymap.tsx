@@ -34,7 +34,7 @@ type CommandSlashEntry = {
   display: string
   description?: string
   aliases?: string[]
-  onSelect: () => void
+  onSelect: (args?: string) => void
 }
 type Command = ReturnType<OpenTuiKeymap["getCommands"]>[number]
 type BindingLookup = {
@@ -257,6 +257,30 @@ export function useCommandShortcut(command: string): Accessor<string> {
   )
 }
 
+/**
+ * Parses raw prompt text as a native slash command invocation. Only the first
+ * line participates: `/name rest…` yields the name and the trimmed remainder.
+ * Input with additional non-empty lines is not a slash command (it goes to the
+ * model as a regular prompt).
+ */
+export function parseSlashInput(text: string): { name: string; args: string } | undefined {
+  if (!text.startsWith("/")) return undefined
+  const lines = text.split("\n")
+  if (lines.slice(1).some((line) => line.trim() !== "")) return undefined
+  const match = /^\/(\S+)(?:\s+(.*))?$/.exec(lines[0])
+  if (!match) return undefined
+  return { name: match[1], args: (match[2] ?? "").trim() }
+}
+
+/** Finds a slash entry whose display name or alias matches `/name` exactly. */
+export function findSlashCommand<T extends { display: string; aliases?: string[] }>(
+  entries: readonly T[],
+  name: string,
+): T | undefined {
+  const slash = `/${name}`
+  return entries.find((entry) => entry.display === slash || entry.aliases?.includes(slash))
+}
+
 export function useCommandSlashes(): Accessor<readonly CommandSlashEntry[]> {
   const keymap = useOpencodeKeymap()
   const entries = useKeymapSelector((keymap: OpenTuiKeymap) =>
@@ -283,7 +307,7 @@ export function useCommandSlashes(): Accessor<readonly CommandSlashEntry[]> {
         aliases: Array.isArray(slashAliases)
           ? slashAliases.filter((alias): alias is string => typeof alias === "string").map((alias) => `/${alias}`)
           : undefined,
-        onSelect: () => keymap.dispatchCommand(entry.command.name),
+        onSelect: (args?: string) => keymap.dispatchCommand(entry.command.name, { payload: args }),
       }
     }),
   )
