@@ -127,10 +127,17 @@ export function pickerDescription(state: TeleportStatus["state"], mode: Teleport
 
 /**
  * With nothing teleported, `/teleport` falls through to the target prompt
- * (start a new teleport); `/list` has nothing to call back, so it closes.
+ * (start a new teleport) — but only when there is a current session to
+ * teleport; from the home screen there is nothing to prompt for. `/list`
+ * has nothing to call back, so it always closes.
  */
-export function pickerEmptyBehavior(mode: TeleportPickerMode): "prompt" | "close" {
-  return mode === "jump" ? "prompt" : "close"
+export function pickerEmptyBehavior(mode: TeleportPickerMode, hasSession: boolean): "prompt" | "close" {
+  return mode === "jump" && hasSession ? "prompt" : "close"
+}
+
+/** Toast for an empty picker; from the home screen, say how to get one. */
+export function pickerEmptyMessage(hasSession: boolean): string {
+  return hasSession ? "No teleported sessions" : "No teleported sessions — open a session to teleport it"
 }
 
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "opencode.internal"])

@@ -28,10 +28,10 @@ Returns are only ever user-initiated — opencode never retries one on its own. 
 
 ## TUI
 
-- `/teleport user@host[:/path]` — teleport the current session. Prompts for the SSH password only if key/agent auth fails. Defaults to the remote home directory when `:/path` is omitted.
-- `/teleport` (no argument) — opens a picker of all teleported sessions: **jump** to one (attach to its remote server) or **return it here** (pull it back and continue locally).
-- `/list` (alias `/teleported`) — the same picker, return-first: choose a remote session to **call back here** (selecting an entry returns it), with jump as the secondary action. Sessions with an interrupted return show "return pending — select to retry", and selecting them retries the return.
-- `/teleport-return` (alias `/return`) — bring the current teleported session home.
+- `/teleport user@host[:/path]` — teleport the current session (requires an open session). Prompts for the SSH password only if key/agent auth fails. Defaults to the remote home directory when `:/path` is omitted.
+- `/teleport` (no argument) — opens a picker of all teleported sessions: **jump** to one (attach to its remote server) or **return it here** (pull it back and continue locally). Works from the home screen too; starting a *new* teleport (the target prompt) requires an open session, so from home an empty list just says to open a session first.
+- `/list` (alias `/teleported`) — the same picker, return-first: choose a remote session to **call back here** (selecting an entry returns it), with jump as the secondary action. Sessions with an interrupted return show "return pending — select to retry", and selecting them retries the return. Also works from the home screen — returning a session from there opens it.
+- `/teleport-return` (alias `/return`) — bring the current teleported session home (requires an open session).
 
 Frozen sessions show a `⇄ teleported to <host>` badge. Network drops show "connection lost / reconnected" toasts, and the view re-syncs automatically after a gap.
 

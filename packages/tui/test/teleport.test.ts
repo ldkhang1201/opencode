@@ -10,6 +10,7 @@ import {
   pickerActions,
   pickerDescription,
   pickerEmptyBehavior,
+  pickerEmptyMessage,
   returnableState,
   targetLabel,
   teleportMetadata,
@@ -81,9 +82,17 @@ describe("picker mode helpers", () => {
     expect(pickerDescription("failed", "return")).toBe("failed")
   })
 
-  test("an empty picker falls through to the target prompt only in jump mode", () => {
-    expect(pickerEmptyBehavior("jump")).toBe("prompt")
-    expect(pickerEmptyBehavior("return")).toBe("close")
+  test("an empty picker falls through to the target prompt only in jump mode with a current session", () => {
+    expect(pickerEmptyBehavior("jump", true)).toBe("prompt")
+    // from the home screen there is no session to teleport, so nothing to prompt for
+    expect(pickerEmptyBehavior("jump", false)).toBe("close")
+    expect(pickerEmptyBehavior("return", true)).toBe("close")
+    expect(pickerEmptyBehavior("return", false)).toBe("close")
+  })
+
+  test("empty-picker message points home-screen users at opening a session", () => {
+    expect(pickerEmptyMessage(true)).toBe("No teleported sessions")
+    expect(pickerEmptyMessage(false)).toBe("No teleported sessions — open a session to teleport it")
   })
 })
 

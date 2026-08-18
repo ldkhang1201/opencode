@@ -22,6 +22,7 @@ import {
   pickerActions,
   pickerDescription,
   pickerEmptyBehavior,
+  pickerEmptyMessage,
   returnableState,
   targetLabel,
   TeleportPasswordRequired,
@@ -61,9 +62,10 @@ export function DialogTeleport(props: { target?: string; primary?: TeleportPicke
     disposed = true
   })
 
-  // /list has nothing to fall through to: close instead of the target prompt
+  // /list has nothing to fall through to, and without a current session
+  // (home screen) there is nothing to teleport: close instead of the target prompt
   function empty(message: string, variant: "info" | "error") {
-    if (pickerEmptyBehavior(mode()) === "close") {
+    if (pickerEmptyBehavior(mode(), sessionID() !== undefined) === "close") {
       toast.show({ message, variant })
       dialog.clear()
       return
@@ -78,7 +80,7 @@ export function DialogTeleport(props: { target?: string; primary?: TeleportPicke
       .then((list) => {
         if (disposed) return
         if (list.length === 0) {
-          empty("No teleported sessions", "info")
+          empty(pickerEmptyMessage(sessionID() !== undefined), "info")
           return
         }
         setTeleports(list)

@@ -53,7 +53,6 @@ import { DialogConfirm } from "../../ui/dialog-confirm"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
-import { DialogTeleport } from "../../component/dialog-teleport"
 import { TeleportReturn, teleportMetadata } from "../../teleport"
 import { useArgs } from "../../context/args"
 import { useExit } from "../../context/exit"
@@ -619,17 +618,9 @@ export function Session() {
         dialog.clear()
       },
     },
-    {
-      title: "Teleport session",
-      value: "session.teleport",
-      category: "Session",
-      slash: {
-        name: "teleport",
-      },
-      run: () => {
-        dialog.replace(() => <DialogTeleport />)
-      },
-    },
+    // NOTE: "session.teleport" and "session.teleport.list" are registered
+    // app-level (src/app.tsx) so they also work on the home screen; register
+    // them here too and the slash palette would show duplicate entries.
     {
       title: "Return teleported session here",
       value: "session.teleport.return",
@@ -641,18 +632,6 @@ export function Session() {
       },
       run: () => {
         exit(new TeleportReturn(route.sessionID))
-      },
-    },
-    {
-      title: "List teleported sessions",
-      value: "session.teleport.list",
-      category: "Session",
-      slash: {
-        name: "list",
-        aliases: ["teleported"],
-      },
-      run: () => {
-        dialog.replace(() => <DialogTeleport primary="return" />)
       },
     },
     {

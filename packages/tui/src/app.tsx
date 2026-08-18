@@ -48,6 +48,7 @@ import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
+import { DialogTeleport } from "./component/dialog-teleport"
 import { DialogWorkspaceList } from "./component/dialog-workspace-list"
 import { DialogConsoleOrg } from "./component/dialog-console-org"
 import { ThemeProvider, useTheme } from "./context/theme"
@@ -595,6 +596,28 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
             type: "home",
           })
           dialog.clear()
+        },
+      },
+      {
+        // Registered app-level (not on the session route) so the picker also
+        // works from the home screen; DialogTeleport itself tolerates having
+        // no current session (jump-first picker only, no target prompt).
+        name: "session.teleport",
+        title: "Teleport session",
+        category: "Session",
+        slashName: "teleport",
+        run: () => {
+          dialog.replace(() => <DialogTeleport />)
+        },
+      },
+      {
+        name: "session.teleport.list",
+        title: "List teleported sessions",
+        category: "Session",
+        slashName: "list",
+        slashAliases: ["teleported"],
+        run: () => {
+          dialog.replace(() => <DialogTeleport primary="return" />)
         },
       },
       {
